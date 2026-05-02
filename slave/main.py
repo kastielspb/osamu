@@ -9,6 +9,7 @@ Core 1: TMC2209 initialization (then idle, PIO handles steps)
 
 import _thread
 import time
+
 import uasyncio as asyncio
 from state_machine import SlaveController
 
@@ -43,5 +44,5 @@ def main():
     asyncio.run(_shared_controller.run())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

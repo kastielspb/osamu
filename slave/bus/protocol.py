@@ -4,6 +4,7 @@ Shared logic between Master (test/extras) and Slave (MicroPython).
 """
 
 import struct
+from enum import IntEnum
 
 # --- Constants ---
 PREAMBLE = 0xAA
@@ -12,51 +13,58 @@ HEADER_SIZE = 5  # PREAMBLE + ADDR + CMD + SEQ + LEN
 CRC_SIZE = 2
 MIN_FRAME_SIZE = HEADER_SIZE + CRC_SIZE  # 7 bytes (no data)
 
-# Addresses
-ADDR_BROADCAST = 0x00
-ADDR_UNASSIGNED = 0xFF
 
-# CMD bit 7: direction
-CMD_DIR_REQUEST = 0x00
-CMD_DIR_RESPONSE = 0x80
+class Addr(IntEnum):
+    BROADCAST = 0x00
+    UNASSIGNED = 0xFF
 
-# Command codes (Master → Slave)
-CMD_PING = 0x01
-CMD_DISCOVER = 0x02
-CMD_ASSIGN_ADDR = 0x03
-CMD_GET_STATUS = 0x04
-CMD_FEED = 0x05
-CMD_RETRACT = 0x06
-CMD_SET_ASSIST = 0x07
-CMD_STOP = 0x08
-CMD_STOP_ALL = 0x09
-CMD_SET_LED = 0x0A
-CMD_GET_CONFIG = 0x0B
-CMD_SET_CURRENT = 0x0C
-CMD_HOME_SLOT = 0x0D
 
-# Status codes
-STATUS_OK = 0x00
-STATUS_BUSY = 0x01
-STATUS_ERROR_SLOT_EMPTY = 0x02
-STATUS_ERROR_JAM = 0x03
-STATUS_ERROR_TIMEOUT = 0x04
-STATUS_ERROR_INVALID_SLOT = 0x05
-STATUS_UNKNOWN_CMD = 0xFF
+class CmdDir(IntEnum):
+    REQUEST = 0x00
+    RESPONSE = 0x80
 
-# Slot states
-SLOT_EMPTY = 0x00
-SLOT_LOADED = 0x01
-SLOT_FEEDING = 0x02
-SLOT_RETRACTING = 0x03
-SLOT_ASSIST = 0x04
-SLOT_ERROR = 0x05
 
-# LED modes
-LED_MODE_OFF = 0x00
-LED_MODE_SOLID = 0x01
-LED_MODE_BREATHE = 0x02
-LED_MODE_BLINK = 0x03
+class Cmd(IntEnum):
+    PING = 0x01
+    DISCOVER = 0x02
+    ASSIGN_ADDR = 0x03
+    GET_STATUS = 0x04
+    FEED = 0x05
+    RETRACT = 0x06
+    SET_ASSIST = 0x07
+    STOP = 0x08
+    STOP_ALL = 0x09
+    SET_LED = 0x0A
+    GET_CONFIG = 0x0B
+    SET_CURRENT = 0x0C
+    HOME_SLOT = 0x0D
+    SET_FILAMENT_COLOR = 0x0E
+
+
+class Status(IntEnum):
+    OK = 0x00
+    BUSY = 0x01
+    ERROR_SLOT_EMPTY = 0x02
+    ERROR_JAM = 0x03
+    ERROR_TIMEOUT = 0x04
+    ERROR_INVALID_SLOT = 0x05
+    UNKNOWN_CMD = 0xFF
+
+
+class SlotState(IntEnum):
+    EMPTY = 0x00
+    LOADED = 0x01
+    FEEDING = 0x02
+    RETRACTING = 0x03
+    ASSIST = 0x04
+    ERROR = 0x05
+
+
+class LedMode(IntEnum):
+    OFF = 0x00
+    SOLID = 0x01
+    BREATHE = 0x02
+    BLINK = 0x03
 
 
 # --- CRC-16/MODBUS ---
@@ -74,7 +82,7 @@ def crc16_modbus(data: bytes) -> int:
 
 
 # --- Frame Building ---
-def build_frame(addr: int, cmd: int, seq: int, data: bytes = b'') -> bytes:
+def build_frame(addr: int, cmd: int, seq: int, data: bytes = b"") -> bytes:
     """
     Build a complete RS485 frame.
 
@@ -90,15 +98,15 @@ def build_frame(addr: int, cmd: int, seq: int, data: bytes = b'') -> bytes:
     if len(data) > MAX_DATA_LEN:
         raise ValueError(f"Data too long: {len(data)} > {MAX_DATA_LEN}")
 
-    header = struct.pack('BBBBB', PREAMBLE, addr, cmd, seq, len(data))
+    header = struct.pack("BBBBB", PREAMBLE, addr, cmd, seq, len(data))
     frame_no_crc = header + data
     crc = crc16_modbus(frame_no_crc)
-    return frame_no_crc + struct.pack('<H', crc)
+    return frame_no_crc + struct.pack("<H", crc)
 
 
-def build_response(addr: int, cmd: int, seq: int, data: bytes = b'') -> bytes:
+def build_response(addr: int, cmd: int, seq: int, data: bytes = b"") -> bytes:
     """Build a response frame (sets bit7 on cmd)."""
-    return build_frame(addr, cmd | CMD_DIR_RESPONSE, seq, data)
+    return build_frame(addr, cmd | CmdDir.RESPONSE, seq, data)
 
 
 # --- Frame Parsing ---
@@ -108,20 +116,23 @@ class ParseError(Exception):
 
 class Frame:
     """Parsed RS485 frame."""
-    __slots__ = ('addr', 'cmd', 'seq', 'data', 'is_response')
+
+    __slots__ = ("addr", "cmd", "seq", "data", "is_response")
 
     def __init__(self, addr: int, cmd: int, seq: int, data: bytes):
         self.addr = addr
         self.cmd = cmd & 0x7F  # strip direction bit
-        self.is_response = bool(cmd & CMD_DIR_RESPONSE)
+        self.is_response = bool(cmd & CmdDir.RESPONSE)
         self.seq = seq
         self.data = data
 
     def __repr__(self):
-        direction = 'RSP' if self.is_response else 'REQ'
-        return (f"Frame({direction} addr=0x{self.addr:02X} "
-                f"cmd=0x{self.cmd:02X} seq={self.seq} "
-                f"data={self.data.hex()})")
+        direction = "RSP" if self.is_response else "REQ"
+        return (
+            f"Frame({direction} addr=0x{self.addr:02X} "
+            f"cmd=0x{self.cmd:02X} seq={self.seq} "
+            f"data={self.data.hex()})"
+        )
 
 
 def parse_frame(buf: bytes) -> Frame:
@@ -152,14 +163,14 @@ def parse_frame(buf: bytes) -> Frame:
     if len(buf) < expected_size:
         raise ParseError(f"Frame incomplete: have {len(buf)}, need {expected_size}")
 
-    data = buf[HEADER_SIZE:HEADER_SIZE + length]
-    crc_received = struct.unpack_from('<H', buf, HEADER_SIZE + length)[0]
-    crc_computed = crc16_modbus(buf[:HEADER_SIZE + length])
+    data = buf[HEADER_SIZE : HEADER_SIZE + length]
+    crc_received = struct.unpack_from("<H", buf, HEADER_SIZE + length)[0]
+    crc_computed = crc16_modbus(buf[: HEADER_SIZE + length])
 
     if crc_received != crc_computed:
         raise ParseError(
-            f"CRC mismatch: received 0x{crc_received:04X}, "
-            f"computed 0x{crc_computed:04X}")
+            f"CRC mismatch: received 0x{crc_received:04X}, computed 0x{crc_computed:04X}"
+        )
 
     return Frame(addr, cmd, seq, data)
 

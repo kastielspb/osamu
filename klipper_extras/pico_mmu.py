@@ -3,8 +3,8 @@ Pico-MMU Klipper Extras Module
 Orchestrates the distributed filament feeding system via Master MCU RS485 bridge.
 """
 
-import logging
 import struct
+from enum import IntEnum
 
 # Klipper extras module conventions
 HINT_FILAMENT_CHANGE = "MMU"
@@ -15,40 +15,47 @@ class PicoMmuError(Exception):
 
 
 # --- Protocol constants (mirror of slave/bus/protocol.py) ---
-CMD_PING = 0x01
-CMD_DISCOVER = 0x02
-CMD_ASSIGN_ADDR = 0x03
-CMD_GET_STATUS = 0x04
-CMD_FEED = 0x05
-CMD_RETRACT = 0x06
-CMD_SET_ASSIST = 0x07
-CMD_STOP = 0x08
-CMD_STOP_ALL = 0x09
-CMD_SET_LED = 0x0A
-CMD_GET_CONFIG = 0x0B
-CMD_SET_CURRENT = 0x0C
-CMD_HOME_SLOT = 0x0D
+class Cmd(IntEnum):
+    PING = 0x01
+    DISCOVER = 0x02
+    ASSIGN_ADDR = 0x03
+    GET_STATUS = 0x04
+    FEED = 0x05
+    RETRACT = 0x06
+    SET_ASSIST = 0x07
+    STOP = 0x08
+    STOP_ALL = 0x09
+    SET_LED = 0x0A
+    GET_CONFIG = 0x0B
+    SET_CURRENT = 0x0C
+    HOME_SLOT = 0x0D
+    SET_FILAMENT_COLOR = 0x0E
 
-STATUS_OK = 0x00
-STATUS_BUSY = 0x01
-STATUS_ERR_SLOT_EMPTY = 0x02
-STATUS_ERR_JAM = 0x03
-STATUS_ERR_TIMEOUT = 0x04
 
-SLOT_EMPTY = 0x00
-SLOT_LOADED = 0x01
-SLOT_FEEDING = 0x02
-SLOT_RETRACTING = 0x03
-SLOT_ASSIST = 0x04
-SLOT_ERROR = 0x05
+class Status(IntEnum):
+    OK = 0x00
+    BUSY = 0x01
+    ERR_SLOT_EMPTY = 0x02
+    ERR_JAM = 0x03
+    ERR_TIMEOUT = 0x04
+
+
+class SlotState(IntEnum):
+    EMPTY = 0x00
+    LOADED = 0x01
+    FEEDING = 0x02
+    RETRACTING = 0x03
+    ASSIST = 0x04
+    ERROR = 0x05
+
 
 SLOT_STATE_NAMES = {
-    SLOT_EMPTY: "EMPTY",
-    SLOT_LOADED: "LOADED",
-    SLOT_FEEDING: "FEEDING",
-    SLOT_RETRACTING: "RETRACTING",
-    SLOT_ASSIST: "ASSIST",
-    SLOT_ERROR: "ERROR",
+    SlotState.EMPTY: "EMPTY",
+    SlotState.LOADED: "LOADED",
+    SlotState.FEEDING: "FEEDING",
+    SlotState.RETRACTING: "RETRACTING",
+    SlotState.ASSIST: "ASSIST",
+    SlotState.ERROR: "ERROR",
 }
 
 # Top-level MMU states
@@ -66,11 +73,31 @@ class PicoMmuSlave:
 
     def __init__(self, config):
         self.unique_id = bytes.fromhex(
-            config.get('unique_id', '0000000000000000').replace('0x', ''))
-        self.slots = [int(s.strip()) for s in config.get('slots', '0,1,2,3').split(',')]
+            config.get("unique_id", "0000000000000000").replace("0x", "")
+        )
+        self.slots = [int(s.strip()) for s in config.get("slots", "0,1,2,3").split(",")]
+        # Per-slot filament colors: comma-separated hex values, one per slot
+        default_colors = ",".join(["00FF00"] * len(self.slots))
+        color_strs = [c.strip() for c in config.get("colors", default_colors).split(",")]
+        if len(color_strs) != len(self.slots):
+            raise config.error(
+                "pico_mmu_slave 'colors' must have %d entries, got %d"
+                % (len(self.slots), len(color_strs))
+            )
+        self.slot_colors = []
+        for cs in color_strs:
+            cs = cs.lstrip("#")
+            if len(cs) != 6:
+                raise config.error(
+                    "pico_mmu_slave: invalid color '%s', must be 6 hex characters" % cs
+                )
+            try:
+                self.slot_colors.append((int(cs[0:2], 16), int(cs[2:4], 16), int(cs[4:6], 16)))
+            except ValueError:
+                raise config.error("pico_mmu_slave: invalid hex color '%s'" % cs)
         self.addr = 0  # Assigned during enumeration
         self.online = False
-        self.slot_states = [SLOT_EMPTY] * 4
+        self.slot_states = [SlotState.EMPTY] * 4
         self.fw_version = (0, 0)
 
 
@@ -83,22 +110,38 @@ class PicoMmu:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
-        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode = self.printer.lookup_object("gcode")
 
         # Configuration
-        self.serial = config.get('serial')
-        self.baud = config.getint('rs485_baud', 115200)
-        self.tool_count = config.getint('tool_count', 8)
-        self.polling_interval = config.getfloat('polling_interval', 0.05)
+        self.serial = config.get("serial")
+        self.baud = config.getint("rs485_baud", 115200)
+        self.tool_count = config.getint("tool_count", 8)
+        self.polling_interval = config.getfloat("polling_interval", 0.05)
 
         # Load slave configurations
         self.slaves = []
-        printer_config = config.get_printer().lookup_object('configfile')
         for i in range(16):  # Max 16 slave boxes
-            section = f'pico_mmu_slave box_{i}'
+            section = f"pico_mmu_slave box_{i}"
             if config.has_section(section):
                 slave_config = config.getsection(section)
                 self.slaves.append(PicoMmuSlave(slave_config))
+
+        # Build per-tool color map (global tool number -> (r, g, b))
+        # Defaults come from printer.cfg; saved overrides are loaded below
+        self._tool_colors = {}
+        for slave in self.slaves:
+            for global_slot, color in zip(slave.slots, slave.slot_colors):
+                self._tool_colors[global_slot] = color
+
+        # Load persisted color overrides from [save_variables]
+        svars = self.printer.lookup_object("save_variables", None)
+        if svars is not None:
+            saved = svars.get_status(None)["variables"].get("mmu_tool_colors", {})
+            for k, v in saved.items():
+                try:
+                    self._tool_colors[int(k)] = (int(v[0]), int(v[1]), int(v[2]))
+                except (ValueError, IndexError, TypeError):
+                    pass
 
         # State
         self.state = STATE_IDLE
@@ -116,38 +159,44 @@ class PicoMmu:
         self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
 
         # Register G-code commands
-        self.gcode.register_command('MMU_HOME', self.cmd_MMU_HOME,
-                                    desc="Initialize and enumerate MMU slaves")
-        self.gcode.register_command('MMU_STATUS', self.cmd_MMU_STATUS,
-                                    desc="Display MMU status")
-        self.gcode.register_command('MMU_CHANGE_TOOL', self.cmd_MMU_CHANGE_TOOL,
-                                    desc="Change filament tool")
-        self.gcode.register_command('MMU_LOAD', self.cmd_MMU_LOAD,
-                                    desc="Load filament from slot")
-        self.gcode.register_command('MMU_UNLOAD', self.cmd_MMU_UNLOAD,
-                                    desc="Unload current filament")
-        self.gcode.register_command('MMU_SELECT', self.cmd_MMU_SELECT,
-                                    desc="Select tool without loading")
+        self.gcode.register_command(
+            "MMU_HOME", self.cmd_MMU_HOME, desc="Initialize and enumerate MMU slaves"
+        )
+        self.gcode.register_command("MMU_STATUS", self.cmd_MMU_STATUS, desc="Display MMU status")
+        self.gcode.register_command(
+            "MMU_CHANGE_TOOL", self.cmd_MMU_CHANGE_TOOL, desc="Change filament tool"
+        )
+        self.gcode.register_command("MMU_LOAD", self.cmd_MMU_LOAD, desc="Load filament from slot")
+        self.gcode.register_command(
+            "MMU_UNLOAD", self.cmd_MMU_UNLOAD, desc="Unload current filament"
+        )
+        self.gcode.register_command(
+            "MMU_SELECT", self.cmd_MMU_SELECT, desc="Select tool without loading"
+        )
+        self.gcode.register_command(
+            "MMU_SET_FILAMENT_COLOR",
+            self.cmd_MMU_SET_FILAMENT_COLOR,
+            desc="Set filament color for a tool slot",
+        )
 
     def _handle_connect(self):
         """Called when Klipper connects to MCU."""
-        self.mcu = self.printer.lookup_object('mcu ' + self.serial)
+        self.mcu = self.printer.lookup_object("mcu " + self.serial)
 
         # Register MCU commands
-        self.rs485_cmd = self.mcu.lookup_command(
-            "pmu_rs485_send addr=%c cmd=%c data=%*s")
+        self.rs485_cmd = self.mcu.lookup_command("pmu_rs485_send addr=%c cmd=%c data=%*s")
         self.rs485_query_cmd = self.mcu.lookup_query_command(
             "pmu_rs485_query addr=%c cmd=%c data=%*s timeout=%u",
-            "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s")
+            "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s",
+        )
 
         # Configure RS485 bus
-        self.mcu.lookup_command("config_pmu_rs485 uart_bus=%c tx_pin=%u "
-                               "rx_pin=%u de_pin=%u baud=%u").send(
-            [1, 0, 1, 2, self.baud])  # UART1, pins from config
+        self.mcu.lookup_command(
+            "config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u"
+        ).send([1, 0, 1, 2, self.baud])  # UART1, pins from config
 
         # Start polling timer
-        self._poll_timer = self.reactor.register_timer(
-            self._poll_slaves, self.reactor.NOW)
+        self._poll_timer = self.reactor.register_timer(self._poll_slaves, self.reactor.NOW)
 
     def _handle_disconnect(self):
         """Called on Klipper disconnect."""
@@ -157,17 +206,17 @@ class PicoMmu:
 
     # --- RS485 Communication ---
 
-    def _rs485_send(self, addr, cmd, data=b''):
+    def _rs485_send(self, addr, cmd, data=b""):
         """Send an RS485 frame (fire-and-forget)."""
         self.rs485_cmd.send([addr, cmd, data])
 
-    def _rs485_query(self, addr, cmd, data=b'', timeout_ms=50):
+    def _rs485_query(self, addr, cmd, data=b"", timeout_ms=50):
         """Send an RS485 frame and wait for response."""
         timeout_ticks = int(timeout_ms * self.mcu.get_adjusted_freq() / 1000)
         params = self.rs485_query_cmd.send([addr, cmd, data, timeout_ticks])
         if params is None:
             return None
-        return params.get('data', b'')
+        return params.get("data", b"")
 
     # --- Polling ---
 
@@ -176,7 +225,7 @@ class PicoMmu:
         for slave in self.slaves:
             if not slave.online or slave.addr == 0:
                 continue
-            resp = self._rs485_query(slave.addr, CMD_GET_STATUS)
+            resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
             if resp and len(resp) >= 6:
                 slave.slot_states = list(resp[:4])
             else:
@@ -192,7 +241,7 @@ class PicoMmu:
 
         # Send DISCOVER broadcasts (multiple cycles)
         for cycle in range(5):
-            resp = self._rs485_query(0xFF, CMD_DISCOVER, timeout_ms=100)
+            resp = self._rs485_query(0xFF, Cmd.DISCOVER, timeout_ms=100)
             if resp and len(resp) >= 8:
                 uid = resp[:8]
                 discovered[uid] = True
@@ -206,12 +255,20 @@ class PicoMmu:
         for slave in self.slaves:
             if slave.unique_id in discovered:
                 addr_data = slave.unique_id + bytes([next_addr])
-                resp = self._rs485_query(0xFF, CMD_ASSIGN_ADDR, addr_data)
-                if resp and resp[0] == STATUS_OK:
+                resp = self._rs485_query(0xFF, Cmd.ASSIGN_ADDR, addr_data)
+                if resp and resp[0] == Status.OK:
                     slave.addr = next_addr
                     slave.online = True
                     self.gcode.respond_info(
-                        f"MMU: Slave {slave.unique_id.hex()} assigned addr {next_addr}")
+                        f"MMU: Slave {slave.unique_id.hex()} assigned addr {next_addr}"
+                    )
+                    # Push stored filament colors to the slave
+                    for j, global_slot in enumerate(slave.slots):
+                        if global_slot in self._tool_colors:
+                            r, g, b = self._tool_colors[global_slot]
+                            self._rs485_send(
+                                slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([j, r, g, b])
+                            )
                 next_addr += 1
 
     # --- Tool resolution ---
@@ -239,7 +296,7 @@ class PicoMmu:
         for slave in self.slaves:
             if slave.online:
                 online_count += 1
-                resp = self._rs485_query(slave.addr, CMD_GET_STATUS)
+                resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
                 if resp and len(resp) >= 4:
                     slave.slot_states = list(resp[:4])
 
@@ -261,7 +318,7 @@ class PicoMmu:
 
     def cmd_MMU_CHANGE_TOOL(self, gcmd):
         """MMU_CHANGE_TOOL TOOL=N: Full tool change sequence."""
-        tool = gcmd.get_int('TOOL')
+        tool = gcmd.get_int("TOOL")
         if tool < 0 or tool >= self.tool_count:
             raise gcmd.error(f"MMU: Invalid tool number T{tool}")
 
@@ -293,7 +350,7 @@ class PicoMmu:
 
     def cmd_MMU_LOAD(self, gcmd):
         """MMU_LOAD TOOL=N: Load filament without full change."""
-        tool = gcmd.get_int('TOOL')
+        tool = gcmd.get_int("TOOL")
         slave, local_slot = self._resolve_tool(tool)
         if slave is None or not slave.online:
             raise gcmd.error(f"MMU: Tool T{tool} unavailable")
@@ -320,7 +377,7 @@ class PicoMmu:
 
     def cmd_MMU_SELECT(self, gcmd):
         """MMU_SELECT TOOL=N: Select tool without loading."""
-        tool = gcmd.get_int('TOOL')
+        tool = gcmd.get_int("TOOL")
         slave, local_slot = self._resolve_tool(tool)
         if slave is None:
             raise gcmd.error(f"MMU: Tool T{tool} not configured")
@@ -336,8 +393,8 @@ class PicoMmu:
         # Tip forming (retract sequence via extruder)
         self.gcode.run_script_from_command("G92 E0")
         self.gcode.run_script_from_command("G1 E-5 F3600")  # Quick retract
-        self.gcode.run_script_from_command("G1 E2 F1800")   # Pause
-        self.gcode.run_script_from_command("G1 E-15 F3000") # Long retract
+        self.gcode.run_script_from_command("G1 E2 F1800")  # Pause
+        self.gcode.run_script_from_command("G1 E-15 F3000")  # Long retract
         self.gcode.run_script_from_command("G92 E0")
 
         self.state = STATE_UNLOADING
@@ -347,13 +404,13 @@ class PicoMmu:
         if slave is None:
             raise PicoMmuError("Current tool slave not found")
 
-        speed_data = struct.pack('<BH', local_slot, 1000)
-        resp = self._rs485_query(slave.addr, CMD_RETRACT, speed_data)
-        if resp is None or resp[0] != STATUS_OK:
+        speed_data = struct.pack("<BH", local_slot, 1000)
+        resp = self._rs485_query(slave.addr, Cmd.RETRACT, speed_data)
+        if resp is None or resp[0] != Status.OK:
             raise PicoMmuError(f"Retract command failed for T{self.current_tool}")
 
         # Wait for retract to complete (sensor clears)
-        if not self._wait_slot_state(slave, local_slot, SLOT_EMPTY, timeout_s=30):
+        if not self._wait_slot_state(slave, local_slot, SlotState.EMPTY, timeout_s=30):
             raise PicoMmuError(f"Retract timeout for T{self.current_tool}")
 
     def _do_load(self, gcmd, slave, local_slot, tool):
@@ -361,9 +418,9 @@ class PicoMmu:
         self.state = STATE_SELECTING
 
         # Send feed command to slave
-        speed_data = struct.pack('<BH', local_slot, 800)
-        resp = self._rs485_query(slave.addr, CMD_FEED, speed_data)
-        if resp is None or resp[0] != STATUS_OK:
+        speed_data = struct.pack("<BH", local_slot, 800)
+        resp = self._rs485_query(slave.addr, Cmd.FEED, speed_data)
+        if resp is None or resp[0] != Status.OK:
             raise PicoMmuError(f"Feed command failed for T{tool}")
 
         self.state = STATE_LOADING
@@ -371,13 +428,13 @@ class PicoMmu:
         # Wait for master filament sensor to trigger
         if not self._wait_master_sensor(timeout_s=60):
             # Stop the feed
-            self._rs485_send(slave.addr, CMD_STOP, bytes([local_slot]))
+            self._rs485_send(slave.addr, Cmd.STOP, bytes([local_slot]))
             raise PicoMmuError(f"Load timeout for T{tool} (filament didn't reach sensor)")
 
         # Switch to assist mode
-        assist_data = struct.pack('<BH', local_slot, 150)  # 150 mA
-        resp = self._rs485_query(slave.addr, CMD_SET_ASSIST, assist_data)
-        if resp is None or resp[0] != STATUS_OK:
+        assist_data = struct.pack("<BH", local_slot, 150)  # 150 mA
+        resp = self._rs485_query(slave.addr, Cmd.SET_ASSIST, assist_data)
+        if resp is None or resp[0] != Status.OK:
             raise PicoMmuError(f"Assist mode failed for T{tool}")
 
         # Feed into extruder
@@ -389,11 +446,11 @@ class PicoMmu:
         """Poll slave until slot reaches target state or timeout."""
         endtime = self.reactor.monotonic() + timeout_s
         while self.reactor.monotonic() < endtime:
-            resp = self._rs485_query(slave.addr, CMD_GET_STATUS)
+            resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
             if resp and len(resp) >= 4:
                 if resp[local_slot] == target_state:
                     return True
-                if resp[local_slot] == SLOT_ERROR:
+                if resp[local_slot] == SlotState.ERROR:
                     return False
             self.reactor.pause(self.reactor.monotonic() + 0.1)
         return False
@@ -406,7 +463,7 @@ class PicoMmu:
         endtime = self.reactor.monotonic() + timeout_s
         # Get the filament sensor endstop object
         try:
-            sensor = self.printer.lookup_object('filament_switch_sensor mmu_sensor')
+            sensor = self.printer.lookup_object("filament_switch_sensor mmu_sensor")
             while self.reactor.monotonic() < endtime:
                 if sensor.filament_present:
                     return True
@@ -421,7 +478,46 @@ class PicoMmu:
         """Send emergency stop to all slaves."""
         for slave in self.slaves:
             if slave.online:
-                self._rs485_send(slave.addr, CMD_STOP_ALL)
+                self._rs485_send(slave.addr, Cmd.STOP_ALL)
+
+    # --- Filament color ---
+
+    def _parse_hex_color(self, hex_str):
+        """Parse a hex color string (with or without #) to (r, g, b)."""
+        s = hex_str.lstrip("#").strip()
+        if len(s) != 6:
+            raise ValueError("Color must be 6 hex characters, got '%s'" % hex_str)
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+        except ValueError:
+            raise ValueError("Invalid hex color '%s'" % hex_str)
+
+    def cmd_MMU_SET_FILAMENT_COLOR(self, gcmd):
+        """MMU_SET_FILAMENT_COLOR TOOL=N COLOR=RRGGBB: Set filament color for a slot."""
+        tool = gcmd.get_int("TOOL")
+        color_str = gcmd.get("COLOR")
+        if tool < 0 or tool >= self.tool_count:
+            raise gcmd.error("MMU: Invalid tool number T%d" % tool)
+        try:
+            r, g, b = self._parse_hex_color(color_str)
+        except ValueError as e:
+            raise gcmd.error("MMU: %s" % e)
+        slave, local_slot = self._resolve_tool(tool)
+        if slave is None:
+            raise gcmd.error("MMU: Tool T%d not configured" % tool)
+        if not slave.online:
+            raise gcmd.error("MMU: Slave for T%d is offline" % tool)
+        self._tool_colors[tool] = (r, g, b)
+        self._rs485_send(slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([local_slot, r, g, b]))
+        # Persist overrides via [save_variables]
+        svars = self.printer.lookup_object("save_variables", None)
+        if svars is not None:
+            saved = dict(svars.get_status(None)["variables"].get("mmu_tool_colors", {}))
+            saved[str(tool)] = [r, g, b]
+            svars.allVariables["mmu_tool_colors"] = saved
+            svars._write_file()
+        canon = color_str.lstrip("#").upper()
+        gcmd.respond_info("MMU: Tool T%d color set to #%s" % (tool, canon))
 
 
 def load_config(config):

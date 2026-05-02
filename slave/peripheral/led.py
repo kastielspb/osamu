@@ -6,28 +6,30 @@ Supports both SK6812 (RGBW, 32-bit) and WS2812B (RGB, 24-bit).
 
 import array
 import time
+
 import rp2
+from bus.protocol import LedMode
+from config import LED_COUNT, LED_PIN
 from machine import Pin
-from config import LED_PIN, LED_COUNT
-from bus.protocol import LED_MODE_OFF, LED_MODE_SOLID, LED_MODE_BREATHE, LED_MODE_BLINK
 
 # Set to True for SK6812 RGBW, False for WS2812B RGB
 RGBW_MODE = True
 
 
-@rp2.asm_pio(sideset_init=rp2.PIO.OUT_LOW, out_shiftdir=rp2.PIO.SHIFT_LEFT,
-             autopull=True, pull_thresh=32)
+@rp2.asm_pio(
+    sideset_init=rp2.PIO.OUT_LOW, out_shiftdir=rp2.PIO.SHIFT_LEFT, autopull=True, pull_thresh=32
+)
 def sk6812():
     """PIO program for SK6812/WS2812B protocol (800 kHz, 32-bit per pixel)."""
     # Timing identical to WS2812B — SK6812 is protocol-compatible
     # T0H=0.3µs, T1H=0.6µs, T0L=0.9µs, T1L=0.6µs (period=1.25µs)
     wrap_target()
     label("bitloop")
-    out(x, 1)               .side(0) [2]
-    jmp(not_x, "do_zero")   .side(1) [1]
-    jmp("bitloop")           .side(1) [4]
+    out(x, 1).side(0)[2]
+    jmp(not_x, "do_zero").side(1)[1]
+    jmp("bitloop").side(1)[4]
     label("do_zero")
-    nop()                    .side(0) [4]
+    nop().side(0)[4]
     wrap()
 
 
@@ -45,12 +47,12 @@ class LEDStrip:
             4,  # Use PIO block 1, SM 0 (index 4)
             sk6812,
             freq=8_000_000,  # 8 MHz for proper SK6812/WS2812B timing
-            sideset_base=Pin(LED_PIN)
+            sideset_base=Pin(LED_PIN),
         )
         self._sm.active(1)
 
-        self._buf = array.array('I', [0] * LED_COUNT)
-        self._modes = [LED_MODE_OFF] * 4  # Per-slot mode
+        self._buf = array.array("I", [0] * LED_COUNT)
+        self._modes = [LedMode.OFF] * 4  # Per-slot mode
         self._colors = [(0, 0, 0, 0)] * 4  # Per-slot RGBW
         self._tick = 0
 
@@ -82,14 +84,15 @@ class LEDStrip:
         """
         if not (0 <= slot < 4):
             return
+
         self._modes[slot] = mode
         self._colors[slot] = (r, g, b, w)
 
     def set_all_off(self):
         """Turn off all LEDs."""
         for i in range(4):
-            self._modes[i] = LED_MODE_OFF
-        self._buf = array.array('I', [0] * LED_COUNT)
+            self._modes[i] = LedMode.OFF
+        self._buf = array.array("I", [0] * LED_COUNT)
         self._write()
 
     def update(self):
@@ -103,11 +106,11 @@ class LEDStrip:
             r, g, b, w = self._colors[slot]
             start = slot * self.LEDS_PER_SLOT
 
-            if mode == LED_MODE_OFF:
+            if mode == LedMode.OFF:
                 color = 0
-            elif mode == LED_MODE_SOLID:
+            elif mode == LedMode.SOLID:
                 color = self._pack_color(r, g, b, w)
-            elif mode == LED_MODE_BREATHE:
+            elif mode == LedMode.BREATHE:
                 # Sine-like breathing using triangle wave
                 phase = (self._tick * 4) % 512
                 if phase > 255:
@@ -116,7 +119,7 @@ class LEDStrip:
                     brightness = phase
                 br = brightness / 255.0
                 color = self._pack_color(int(r * br), int(g * br), int(b * br), int(w * br))
-            elif mode == LED_MODE_BLINK:
+            elif mode == LedMode.BLINK:
                 # 1 Hz blink (on 500ms, off 500ms at 50Hz update)
                 on = (self._tick % 50) < 25
                 color = self._pack_color(r, g, b, w) if on else 0
@@ -130,16 +133,16 @@ class LEDStrip:
 
     def set_error(self, slot: int):
         """Quick helper: set slot to blinking red (error indication)."""
-        self.set_slot(slot, LED_MODE_BLINK, 255, 0, 0)
+        self.set_slot(slot, LedMode.BLINK, 255, 0, 0)
 
     def set_feeding(self, slot: int):
         """Quick helper: set slot to breathing blue (feeding)."""
-        self.set_slot(slot, LED_MODE_BREATHE, 0, 0, 255)
+        self.set_slot(slot, LedMode.BREATHE, 0, 0, 255)
 
     def set_loaded(self, slot: int):
         """Quick helper: set slot to solid green (loaded/ready)."""
-        self.set_slot(slot, LED_MODE_SOLID, 0, 255, 0)
+        self.set_slot(slot, LedMode.SOLID, 0, 255, 0)
 
     def set_assist(self, slot: int):
         """Quick helper: set slot to solid cyan (assist mode)."""
-        self.set_slot(slot, LED_MODE_SOLID, 0, 200, 200)
+        self.set_slot(slot, LedMode.SOLID, 0, 200, 200)

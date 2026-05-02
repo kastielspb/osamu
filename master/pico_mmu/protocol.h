@@ -34,10 +34,11 @@
 #define PMU_CMD_SET_ASSIST   0x07
 #define PMU_CMD_STOP         0x08
 #define PMU_CMD_STOP_ALL     0x09
-#define PMU_CMD_SET_LED      0x0A
-#define PMU_CMD_GET_CONFIG   0x0B
-#define PMU_CMD_SET_CURRENT  0x0C
-#define PMU_CMD_HOME_SLOT    0x0D
+#define PMU_CMD_SET_LED              0x0A
+#define PMU_CMD_GET_CONFIG           0x0B
+#define PMU_CMD_SET_CURRENT          0x0C
+#define PMU_CMD_HOME_SLOT            0x0D
+#define PMU_CMD_SET_FILAMENT_COLOR   0x0E
 
 // Status codes
 #define PMU_STATUS_OK              0x00

@@ -3,8 +3,9 @@ Microswitch sensor driver with software debounce.
 """
 
 import time
+
+from config import SENSOR_DEBOUNCE_MS, SENSOR_PINS
 from machine import Pin
-from config import SENSOR_PINS, SENSOR_DEBOUNCE_MS
 
 
 class Sensor:
@@ -49,7 +50,7 @@ class Sensor:
         # Stable for debounce period?
         elapsed = time.ticks_diff(now, self._last_change)
         if elapsed >= SENSOR_DEBOUNCE_MS:
-            new_state = (raw == 0)  # Active LOW
+            new_state = raw == 0  # Active LOW
             if new_state != self._state:
                 self._state = new_state
                 return True  # State changed
@@ -78,7 +79,7 @@ class SensorBank:
         mask = 0
         for i, sensor in enumerate(self.sensors):
             if sensor.is_triggered:
-                mask |= (1 << i)
+                mask |= 1 << i
         return mask
 
     def __getitem__(self, slot: int) -> Sensor:

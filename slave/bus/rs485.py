@@ -4,15 +4,10 @@ Handles UART TX/RX with DE (Direction Enable) pin management.
 """
 
 import uasyncio as asyncio
+from config import RS485_BAUD, RS485_DE_PIN, RS485_RX_PIN, RS485_TX_PIN, RS485_UART_ID
 from machine import UART, Pin
-from .protocol import (
-    Frame, FrameReader, build_response, parse_frame, ParseError,
-    ADDR_UNASSIGNED, PREAMBLE
-)
-from config import (
-    RS485_UART_ID, RS485_TX_PIN, RS485_RX_PIN,
-    RS485_DE_PIN, RS485_BAUD
-)
+
+from .protocol import Frame, FrameReader, build_response
 
 
 class RS485:
@@ -29,7 +24,9 @@ class RS485:
             baudrate=RS485_BAUD,
             tx=Pin(RS485_TX_PIN),
             rx=Pin(RS485_RX_PIN),
-            bits=8, parity=None, stop=1
+            bits=8,
+            parity=None,
+            stop=1,
         )
         self._de = Pin(RS485_DE_PIN, Pin.OUT, value=0)  # Start in RX mode
         self._reader = FrameReader()
@@ -57,7 +54,7 @@ class RS485:
         await asyncio.sleep_ms(1 + (len(frame_bytes) * 10 * 1000 // RS485_BAUD))
         self._set_rx_mode()
 
-    async def send_response(self, addr: int, cmd: int, seq: int, data: bytes = b''):
+    async def send_response(self, addr: int, cmd: int, seq: int, data: bytes = b""):
         """Build and send a response frame."""
         frame = build_response(addr, cmd, seq, data)
         await self.send(frame)

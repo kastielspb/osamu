@@ -6,13 +6,17 @@ Supports setting run/hold current and reading StallGuard result.
 
 import struct
 import time
-from machine import UART, Pin
-from config import (
-    TMC_UART_ID, TMC_UART_TX_PIN, TMC_UART_RX_PIN,
-    TMC_ADDRESSES, DEFAULT_RUN_CURRENT_MA, DEFAULT_HOLD_CURRENT_MA,
-    STALLGUARD_THRESHOLD
-)
 
+from config import (
+    DEFAULT_HOLD_CURRENT_MA,
+    DEFAULT_RUN_CURRENT_MA,
+    STALLGUARD_THRESHOLD,
+    TMC_ADDRESSES,
+    TMC_UART_ID,
+    TMC_UART_RX_PIN,
+    TMC_UART_TX_PIN,
+)
+from machine import UART, Pin
 
 # --- TMC2209 Register Addresses ---
 REG_GCONF = 0x00
@@ -80,7 +84,7 @@ class TMC2209:
         addr = self._addr
         reg_w = reg | 0x80  # Write flag
 
-        data = struct.pack('>I', value)
+        data = struct.pack(">I", value)
         datagram = bytes([sync, addr, reg_w]) + data
         crc = _crc8(datagram)
         datagram += bytes([crc])
@@ -107,7 +111,7 @@ class TMC2209:
         time.sleep_us(500)
 
         # Read echo of our request (4 bytes) + response (8 bytes)
-        echo = self._uart.read(4)  # Our TX echo
+        self._uart.read(4)  # discard TX echo
         time.sleep_ms(2)
 
         # Response: SYNC + 0xFF + REG + DATA[31:0] + CRC
@@ -119,11 +123,14 @@ class TMC2209:
         if _crc8(resp[:7]) != resp[7]:
             return None
 
-        value = struct.unpack('>I', resp[3:7])[0]
+        value = struct.unpack(">I", resp[3:7])[0]
         return value
 
-    def init(self, run_current_ma: int = DEFAULT_RUN_CURRENT_MA,
-             hold_current_ma: int = DEFAULT_HOLD_CURRENT_MA):
+    def init(
+        self,
+        run_current_ma: int = DEFAULT_RUN_CURRENT_MA,
+        hold_current_ma: int = DEFAULT_HOLD_CURRENT_MA,
+    ):
         """Initialize TMC2209 with default settings."""
         # GCONF: PDN_DISABLE (use UART), MSTEP_REG_SELECT, MULTISTEP_FILT
         gconf = GCONF_PDN_DISABLE | GCONF_MSTEP_REG_SELECT | GCONF_MULTISTEP_FILT
@@ -186,12 +193,17 @@ class TMC2209Bank:
             baudrate=115200,
             tx=Pin(TMC_UART_TX_PIN),
             rx=Pin(TMC_UART_RX_PIN),
-            bits=8, parity=None, stop=1
+            bits=8,
+            parity=None,
+            stop=1,
         )
         self.drivers = [TMC2209(self._uart, addr) for addr in TMC_ADDRESSES]
 
-    def init_all(self, run_current_ma: int = DEFAULT_RUN_CURRENT_MA,
-                 hold_current_ma: int = DEFAULT_HOLD_CURRENT_MA):
+    def init_all(
+        self,
+        run_current_ma: int = DEFAULT_RUN_CURRENT_MA,
+        hold_current_ma: int = DEFAULT_HOLD_CURRENT_MA,
+    ):
         """Initialize all 4 TMC2209 drivers."""
         for drv in self.drivers:
             drv.init(run_current_ma, hold_current_ma)

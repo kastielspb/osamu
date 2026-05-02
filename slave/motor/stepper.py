@@ -4,8 +4,8 @@ Uses one PIO state machine per motor for jitter-free step generation.
 """
 
 import rp2
+from config import DIR_PINS, EN_PINS, STEP_PINS
 from machine import Pin
-from config import STEP_PINS, DIR_PINS, EN_PINS
 
 
 # PIO program: generates step pulses at frequency controlled via TX FIFO.
@@ -19,26 +19,26 @@ def step_pulse():
     Blocking pull: stops when FIFO is empty (no auto-pull).
     """
     wrap_target()
-    pull(block)          # Wait for new delay value
-    mov(x, osr)          # X = delay count
-    jmp(not_x, "stop")   # If X==0, stop (no pulses)
+    pull(block)  # Wait for new delay value
+    mov(x, osr)  # X = delay count
+    jmp(not_x, "stop")  # If X==0, stop (no pulses)
 
     label("pulse")
-    set(pins, 1) [1]     # Step HIGH (min 2 cycles ≈ 2 µs at 1 MHz)
-    set(pins, 0)          # Step LOW
+    set(pins, 1)[1]  # Step HIGH (min 2 cycles ≈ 2 µs at 1 MHz)
+    set(pins, 0)  # Step LOW
     label("delay")
-    jmp(x_dec, "delay")   # Delay loop
+    jmp(x_dec, "delay")  # Delay loop
     jmp("pulse_done")
 
     label("stop")
-    set(pins, 0)          # Ensure step LOW
-    jmp("wrap_target")    # Wait for next FIFO value
+    set(pins, 0)  # Ensure step LOW
+    jmp("wrap_target")  # Wait for next FIFO value
 
     label("pulse_done")
     # After one step, check FIFO for new value (non-blocking)
     pull(noblock)
-    mov(x, osr)           # X = new delay (or last value if FIFO empty)
-    jmp(not_x, "stop")    # X==0 → stop
+    mov(x, osr)  # X = new delay (or last value if FIFO empty)
+    jmp(not_x, "stop")  # X==0 → stop
     jmp("pulse")
     wrap()
 
@@ -69,7 +69,7 @@ class Stepper:
             pio_block * 4 + slot,  # SM index: block0=[0,1,2,3], block1=[4,5,6,7]
             step_pulse,
             freq=self.PIO_FREQ,
-            set_base=self._step_pin
+            set_base=self._step_pin,
         )
         self._running = False
         self._speed_hz = 0

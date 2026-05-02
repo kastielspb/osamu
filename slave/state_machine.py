@@ -5,30 +5,24 @@ Coordinates 4 slots, handles RS485 commands, and manages watchdog.
 
 import struct
 import time
-import urandom
-import uasyncio as asyncio
-from machine import unique_id
 
-from bus.protocol import (
-    CMD_PING, CMD_DISCOVER, CMD_ASSIGN_ADDR, CMD_GET_STATUS,
-    CMD_FEED, CMD_RETRACT, CMD_SET_ASSIST, CMD_STOP, CMD_STOP_ALL,
-    CMD_SET_LED, CMD_GET_CONFIG, CMD_SET_CURRENT, CMD_HOME_SLOT,
-    ADDR_UNASSIGNED, ADDR_BROADCAST,
-    STATUS_OK, STATUS_BUSY, STATUS_ERROR_INVALID_SLOT, STATUS_UNKNOWN_CMD,
-    SLOT_EMPTY, SLOT_LOADED, Frame
-)
+import uasyncio as asyncio
+import urandom
+from bus.protocol import Addr, Cmd, Frame, LedMode, SlotState, Status
 from bus.rs485 import RS485
+from config import (
+    DEFAULT_HOLD_CURRENT_MA,
+    DEFAULT_RUN_CURRENT_MA,
+    DEVICE_ADDR_UNASSIGNED,
+    STALLGUARD_POLL_MS,
+    WATCHDOG_TIMEOUT_MS,
+)
+from machine import unique_id
 from motor.slot import Slot
 from motor.stepper import StepperBank
 from motor.tmc2209 import TMC2209Bank
-from peripheral.sensor import SensorBank
 from peripheral.led import LEDStrip
-from config import (
-    WATCHDOG_TIMEOUT_MS, STALLGUARD_POLL_MS,
-    DEFAULT_RUN_CURRENT_MA, DEFAULT_HOLD_CURRENT_MA,
-    DEVICE_ADDR_UNASSIGNED
-)
-
+from peripheral.sensor import SensorBank
 
 # Firmware version (major.minor as 2 bytes)
 FW_VERSION = (0, 1)
@@ -37,7 +31,7 @@ FW_VERSION = (0, 1)
 def _load_address() -> int:
     """Load saved address from flash NVS. Returns 0xFF if not set."""
     try:
-        with open('addr.cfg', 'r') as f:
+        with open("addr.cfg", "r") as f:
             return int(f.read().strip())
     except (OSError, ValueError):
         return DEVICE_ADDR_UNASSIGNED
@@ -45,7 +39,7 @@ def _load_address() -> int:
 
 def _save_address(addr: int):
     """Save address to flash NVS."""
-    with open('addr.cfg', 'w') as f:
+    with open("addr.cfg", "w") as f:
         f.write(str(addr))
 
 
@@ -71,6 +65,9 @@ class SlaveController:
             Slot(i, self._steppers[i], self._tmc_bank.drivers[i], self._sensors[i])
             for i in range(4)
         ]
+
+        # Per-slot filament colors (r, g, b); default green
+        self._filament_colors = [(0, 255, 0)] * 4
 
         # Watchdog
         self._last_poll_time = time.ticks_ms()
@@ -105,22 +102,21 @@ class SlaveController:
     async def _handle_frame(self, frame: Frame):
         """Process an incoming RS485 frame."""
         # Address filtering
-        if frame.addr not in (self._addr, ADDR_BROADCAST, ADDR_UNASSIGNED):
+        if frame.addr not in (self._addr, Addr.BROADCAST, Addr.UNASSIGNED):
             return  # Not for us
 
         # Discovery: only respond if unassigned
-        if frame.cmd == CMD_DISCOVER:
+        if frame.cmd == Cmd.DISCOVER:
             if self._addr == DEVICE_ADDR_UNASSIGNED:
                 # Random backoff to reduce collisions
                 await asyncio.sleep_ms(urandom.getrandbits(6))  # 0-63 ms
                 await self._rs485.send_response(
-                    ADDR_UNASSIGNED, CMD_DISCOVER, frame.seq,
-                    self._unique_id
+                    Addr.UNASSIGNED, Cmd.DISCOVER, frame.seq, self._unique_id
                 )
             return
 
         # Assign address: match by unique_id
-        if frame.cmd == CMD_ASSIGN_ADDR:
+        if frame.cmd == Cmd.ASSIGN_ADDR:
             if len(frame.data) >= 9:
                 uid = frame.data[:8]
                 new_addr = frame.data[8]
@@ -128,8 +124,7 @@ class SlaveController:
                     self._addr = new_addr
                     _save_address(new_addr)
                     await self._rs485.send_response(
-                        new_addr, CMD_ASSIGN_ADDR, frame.seq,
-                        bytes([STATUS_OK])
+                        new_addr, Cmd.ASSIGN_ADDR, frame.seq, bytes([Status.OK])
                     )
             return
 
@@ -138,7 +133,7 @@ class SlaveController:
             return
 
         # Only process commands addressed to us (not broadcast for most cmds)
-        if frame.addr != self._addr and frame.addr != ADDR_BROADCAST:
+        if frame.addr != self._addr and frame.addr != Addr.BROADCAST:
             return
 
         # Reset watchdog on any valid command
@@ -147,132 +142,150 @@ class SlaveController:
 
         # Dispatch
         response_data = self._dispatch_command(frame.cmd, frame.data)
-        if response_data is not None and frame.addr != ADDR_BROADCAST:
-            await self._rs485.send_response(
-                self._addr, frame.cmd, frame.seq, response_data
-            )
+        if response_data is not None and frame.addr != Addr.BROADCAST:
+            await self._rs485.send_response(self._addr, frame.cmd, frame.seq, response_data)
 
     def _dispatch_command(self, cmd: int, data: bytes) -> bytes | None:
         """
         Dispatch command and return response data (or None for no response).
         """
-        if cmd == CMD_PING:
-            return struct.pack('BB', FW_VERSION[0], FW_VERSION[1])
+        if cmd == Cmd.PING:
+            return struct.pack("BB", FW_VERSION[0], FW_VERSION[1])
 
-        elif cmd == CMD_GET_STATUS:
+        elif cmd == Cmd.GET_STATUS:
             states = bytes([s.state for s in self._slots])
             sensors = bytes([self._sensors.get_states()])
-            errors = bytes([
-                self._slots[0].error_code | (self._slots[1].error_code << 2) |
-                (self._slots[2].error_code << 4) | (self._slots[3].error_code << 6)
-            ])
+            errors = bytes(
+                [
+                    self._slots[0].error_code
+                    | (self._slots[1].error_code << 2)
+                    | (self._slots[2].error_code << 4)
+                    | (self._slots[3].error_code << 6)
+                ]
+            )
             return states + sensors + errors
 
-        elif cmd == CMD_FEED:
+        elif cmd == Cmd.FEED:
             if len(data) < 1:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
-            speed = struct.unpack('<H', data[1:3])[0] if len(data) >= 3 else 0
+            speed = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             status = self._slots[slot].feed(speed)
-            if status == STATUS_OK:
+            if status == Status.OK:
                 self._leds.set_feeding(slot)
             return bytes([status])
 
-        elif cmd == CMD_RETRACT:
+        elif cmd == Cmd.RETRACT:
             if len(data) < 1:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
-            speed = struct.unpack('<H', data[1:3])[0] if len(data) >= 3 else 0
+            speed = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             status = self._slots[slot].retract(speed)
-            if status == STATUS_OK:
+            if status == Status.OK:
                 self._leds.set_feeding(slot)
             return bytes([status])
 
-        elif cmd == CMD_SET_ASSIST:
+        elif cmd == Cmd.SET_ASSIST:
             if len(data) < 1:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
-            current = struct.unpack('<H', data[1:3])[0] if len(data) >= 3 else 0
+            current = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             status = self._slots[slot].set_assist(current)
-            if status == STATUS_OK:
+            if status == Status.OK:
                 self._leds.set_assist(slot)
             return bytes([status])
 
-        elif cmd == CMD_STOP:
+        elif cmd == Cmd.STOP:
             if len(data) < 1:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             status = self._slots[slot].stop()
             self._update_slot_led(slot)
             return bytes([status])
 
-        elif cmd == CMD_STOP_ALL:
+        elif cmd == Cmd.STOP_ALL:
             for s in self._slots:
                 s.emergency_stop()
             self._steppers.stop_all()
             for i in range(4):
                 self._update_slot_led(i)
-            return bytes([STATUS_OK])
+            return bytes([Status.OK])
 
-        elif cmd == CMD_SET_LED:
+        elif cmd == Cmd.SET_LED:
             if len(data) < 5:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             mode, slot, r, g, b = data[0], data[1], data[2], data[3], data[4]
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             self._leds.set_slot(slot, mode, r, g, b)
-            return bytes([STATUS_OK])
+            return bytes([Status.OK])
 
-        elif cmd == CMD_GET_CONFIG:
+        elif cmd == Cmd.GET_CONFIG:
             # Return: unique_id(8) + addr(1) + fw_ver(2) + num_slots(1)
-            config = self._unique_id + bytes([self._addr]) + \
-                     struct.pack('BB', FW_VERSION[0], FW_VERSION[1]) + bytes([4])
+            config = (
+                self._unique_id
+                + bytes([self._addr])
+                + struct.pack("BB", FW_VERSION[0], FW_VERSION[1])
+                + bytes([4])
+            )
             return config
 
-        elif cmd == CMD_SET_CURRENT:
+        elif cmd == Cmd.SET_CURRENT:
             if len(data) < 5:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
-            run_ma = struct.unpack('<H', data[1:3])[0]
-            hold_ma = struct.unpack('<H', data[3:5])[0]
+            run_ma = struct.unpack("<H", data[1:3])[0]
+            hold_ma = struct.unpack("<H", data[3:5])[0]
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             self._tmc_bank.set_slot_current(slot, run_ma, hold_ma)
-            return bytes([STATUS_OK])
+            return bytes([Status.OK])
 
-        elif cmd == CMD_HOME_SLOT:
+        elif cmd == Cmd.HOME_SLOT:
             if len(data) < 1:
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             slot = data[0]
             if not (0 <= slot < 4):
-                return bytes([STATUS_ERROR_INVALID_SLOT])
+                return bytes([Status.ERROR_INVALID_SLOT])
             # Home = feed until sensor triggers
             status = self._slots[slot].feed()
             return bytes([status])
 
+        elif cmd == Cmd.SET_FILAMENT_COLOR:
+            if len(data) < 4:
+                return bytes([Status.ERROR_INVALID_SLOT])
+            slot, r, g, b = data[0], data[1], data[2], data[3]
+            if not (0 <= slot < 4):
+                return bytes([Status.ERROR_INVALID_SLOT])
+            self._filament_colors[slot] = (r, g, b)
+            if self._slots[slot].state == SlotState.LOADED:
+                self._update_slot_led(slot)
+            return bytes([Status.OK])
+
         else:
-            return bytes([STATUS_UNKNOWN_CMD])
+            return bytes([Status.UNKNOWN_CMD])
 
     def _update_slot_led(self, slot: int):
         """Update LED based on current slot state."""
         state = self._slots[slot].state
-        if state == SLOT_EMPTY:
-            self._leds.set_slot(slot, 0)  # OFF
-        elif state == SLOT_LOADED:
-            self._leds.set_loaded(slot)
-        elif state in (SLOT_FEEDING, SLOT_RETRACTING):
+        if state == SlotState.EMPTY:
+            self._leds.set_slot(slot, LedMode.OFF)
+        elif state == SlotState.LOADED:
+            r, g, b = self._filament_colors[slot]
+            self._leds.set_slot(slot, LedMode.SOLID, r, g, b)
+        elif state in (SlotState.FEEDING, SlotState.RETRACTING):
             self._leds.set_feeding(slot)
-        elif state == 0x04:  # ASSIST
+        elif state == SlotState.ASSIST:
             self._leds.set_assist(slot)
-        elif state == 0x05:  # ERROR
+        elif state == SlotState.ERROR:
             self._leds.set_error(slot)
 
     # --- Periodic tasks ---
@@ -285,11 +298,15 @@ class SlaveController:
                 slot = self._slots[slot_id]
                 sensor = self._sensors[slot_id]
                 # Handle retract completion (sensor cleared)
-                if not sensor.is_triggered and slot.state == 0x03:  # RETRACTING
+                if not sensor.is_triggered and slot.state == SlotState.RETRACTING:
                     slot.on_retract_complete()
                     self._update_slot_led(slot_id)
+                # Handle filament runout during assist mode
+                elif not sensor.is_triggered and slot.state == SlotState.ASSIST:
+                    slot.stop()
+                    self._update_slot_led(slot_id)
                 # Handle idle state update
-                elif slot.state in (SLOT_EMPTY, SLOT_LOADED):
+                elif slot.state in (SlotState.EMPTY, SlotState.LOADED):
                     slot.update_from_sensor()
                     self._update_slot_led(slot_id)
             await asyncio.sleep_ms(2)
