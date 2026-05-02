@@ -1,14 +1,23 @@
 """
 Scenario integration tests matching docs/firmware-spec.md.
 
-Each test corresponds to one of the six scenarios in the specification:
+Each test corresponds to one of the numbered scenarios in the specification:
 
-  Scenario 1 — System Initialisation (MMU_HOME)
-  Scenario 2 — Tool Change (T0 → T1)
-  Scenario 3 — Normal Polling (during print)
-  Scenario 4 — Jam Detection (StallGuard)
-  Scenario 5 — Filament Runout (ASSIST → EMPTY)
-  Scenario 6 — Connection Loss (Watchdog)
+  Scenario 1  — System Initialisation (MMU_HOME)
+  Scenario 2  — Tool Change (T0 → T1)
+  Scenario 3  — Normal Polling (during print)
+  Scenario 4  — Jam Detection (StallGuard)
+  Scenario 5  — Filament Runout (ASSIST → EMPTY)
+  Scenario 6  — Connection Loss (Watchdog)
+  Scenario 7  — Set Filament Color
+  Scenario 8  — Filament Color After Power Cycle
+  Scenario 9  — Concurrent Slots (ASSIST + FEED)
+  Scenario 10 — SET_FILAMENT_COLOR While a Slot Is in ASSIST (branch A)
+  Scenario 10b— SET_FILAMENT_COLOR on an Idle Slot During ASSIST (branch B)
+  Scenario 11 — Hot-Plug: Second Slave Joins Active Bus
+  Scenario 12 — Short Retracts During Active Print (ASSIST Unaffected)
+  Scenario 13 — RETRACT on an Idle Slot While Another Is in ASSIST
+  Scenario 14 — System Block Diagram (no test)
 
 The tests exercise the complete slave firmware stack (state_machine →
 bus/rs485 → bus/protocol) via in-process pipes.  No real hardware is
@@ -25,7 +34,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from bus.protocol import Addr, Cmd, LedMode, SlotState, Status  # noqa: E402
-from e2e_harness import BusMasterMulti, _load_cfg  # noqa: E402
+from e2e_harness import BusMaster, BusMasterMulti, _load_cfg  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Scenario 1: System Initialisation (MMU_HOME)
@@ -433,3 +442,358 @@ def test_scenario_7_set_filament_color(bus):
     assert slave.ctrl._leds._colors[2][:3] == (0, 200, 80), (
         "LED must use the stored color when transitioning to LOADED"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8: Filament Color After Power Cycle
+# Ref: firmware-spec.md §Scenario 8
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_8_color_after_power_cycle(bus):
+    """
+    On every boot _filament_colors resets to the compiled-in default (solid
+    green).  During MMU_HOME, Klipper pushes saved colors back via
+    SET_FILAMENT_COLOR for slots that have a saved entry; slots with no saved
+    entry keep the default.
+
+    The fixture provides a freshly-started slave, which models a power cycle.
+
+    Validates:
+    - All slots start with the default color (0, 255, 0) after boot
+    - SET_FILAMENT_COLOR updates exactly the targeted slots
+    - Slots that receive no SET_FILAMENT_COLOR remain at the default green
+    - LED reflects the updated color for each LOADED slot immediately
+    """
+    master, slave = bus
+
+    # --- Verify defaults right after boot ---
+    for slot in range(4):
+        assert slave.ctrl._filament_colors[slot] == (0, 255, 0), (
+            f"Slot {slot}: default color must be (0, 255, 0) on boot"
+        )
+
+    # Load slots 0, 1, 3 (slot 2 deliberately left empty — no color push)
+    slave.inject_filament(0, True)
+    slave.inject_filament(1, True)
+    slave.inject_filament(3, True)
+    time.sleep(0.05)
+
+    # --- Re-sync three slots (simulating MMU_HOME color restore) ---
+    colors = [
+        (0, 0, (0, 255, 0)),  # slot 0 — keep default green
+        (1, 1, (255, 51, 0)),  # slot 1 — orange
+        (3, 3, (0, 0, 255)),  # slot 3 — blue
+    ]
+    for slot, _, (r, g, b) in colors:
+        resp = master.query(slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([slot, r, g, b]))
+        assert resp is not None and resp[0] == Status.OK, (
+            f"SET_FILAMENT_COLOR must return OK for slot {slot}"
+        )
+
+    # Slot 0: explicitly set to same default green
+    assert slave.ctrl._filament_colors[0] == (0, 255, 0)
+    # Slot 1: updated to orange
+    assert slave.ctrl._filament_colors[1] == (255, 51, 0)
+    # Slot 3: updated to blue
+    assert slave.ctrl._filament_colors[3] == (0, 0, 255)
+    # Slot 2: never touched — still default green
+    assert slave.ctrl._filament_colors[2] == (0, 255, 0), (
+        "Slot 2 must retain default green — no SET_FILAMENT_COLOR was issued"
+    )
+
+    # LEDs for LOADED slots must reflect stored colors
+    time.sleep(0.02)  # let _led_loop tick
+    assert slave.ctrl._leds._colors[1][:3] == (255, 51, 0), "Slot 1 LED must be orange"
+    assert slave.ctrl._leds._colors[3][:3] == (0, 0, 255), "Slot 3 LED must be blue"
+    # Slot 2 is EMPTY — LED state is irrelevant but color entry must still be default
+    assert slave.ctrl._filament_colors[2] == (0, 255, 0)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 9: Concurrent slots — ASSIST active while another slot is fed
+# Ref: firmware-spec.md §Scenario 9
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_9_feed_during_assist(bus):
+    """
+    Slot 0 is in ASSIST mode (active print in progress).
+    Master starts feeding slot 1 (next colour staged).
+
+    Validates:
+    - FEED on slot 1 returns OK while slot 0 remains in ASSIST
+    - GET_STATUS shows both states simultaneously (slot 0 ASSIST, slot 1 FEEDING)
+    - STOP on slot 1 returns OK; slot 0 stays in ASSIST unaffected
+    """
+    master, slave = bus
+    # Load both slots
+    slave.inject_filament(0, True)
+    slave.inject_filament(1, True)
+    time.sleep(0.05)
+
+    # Slot 0: enter assist
+    assist_data = struct.pack("<BH", 0, 150)
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, assist_data)
+    assert resp is not None and resp[0] == Status.OK
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.ASSIST, "Slot 0 must be in ASSIST"
+
+    # Slot 1: start feeding while slot 0 is still in ASSIST
+    feed_data = struct.pack("<BH", 1, 800)
+    resp = master.query(slave.addr, Cmd.FEED, feed_data)
+    assert resp is not None and resp[0] == Status.OK, "FEED on slot 1 must succeed during ASSIST"
+
+    # Both active simultaneously
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.ASSIST, "Slot 0 must remain ASSIST while slot 1 is FEEDING"
+    assert status[1] == SlotState.FEEDING, "Slot 1 must be FEEDING"
+
+    # Stop slot 1 — slot 0 must be unaffected
+    resp = master.query(slave.addr, Cmd.STOP, bytes([1]))
+    assert resp is not None and resp[0] == Status.OK
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.ASSIST, "Slot 0 must still be ASSIST after slot 1 stopped"
+    assert status[1] == SlotState.LOADED, "Slot 1 must be LOADED after STOP (filament present)"
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Scenario 10: SET_FILAMENT_COLOR while a slot is in ASSIST
+# Ref: firmware-spec.md §Scenario 10
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_10_color_set_on_assisting_slot(bus):
+    """
+    SET_FILAMENT_COLOR sent for the slot currently in ASSIST mode.
+
+    The color must be stored for later use but the LED must not be
+    changed immediately (it should stay in the ASSIST visual state).
+    When the slot subsequently stops and returns to LOADED, the stored
+    color is applied automatically.
+
+    Validates:
+    - SET_FILAMENT_COLOR returns OK for an ASSIST slot
+    - _filament_colors is updated
+    - LED mode does NOT change while the slot is in ASSIST
+    - After STOP, LED transitions to SOLID with the new color
+    """
+    master, slave = bus
+    slave.inject_filament(0, True)
+    time.sleep(0.05)
+
+    # Enter assist on slot 0
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 0, 150))
+    assert resp is not None and resp[0] == Status.OK
+    assert slave.ctrl._slots[0].state == SlotState.ASSIST
+
+    led_mode_before = slave.ctrl._leds._modes[0]  # should be ASSIST visual
+
+    # Set a new color while in ASSIST
+    color_data = bytes([0, 200, 100, 0])  # slot=0, amber
+    resp = master.query(slave.addr, Cmd.SET_FILAMENT_COLOR, color_data)
+    assert resp is not None and resp[0] == Status.OK, "SET_FILAMENT_COLOR must return OK"
+
+    # Color stored
+    assert slave.ctrl._filament_colors[0] == (200, 100, 0), "Color must be stored"
+
+    # LED must NOT have changed — slot is still in ASSIST
+    time.sleep(0.02)
+    assert slave.ctrl._leds._modes[0] == led_mode_before, (
+        "LED must not change while slot is in ASSIST"
+    )
+
+    # Stop slot 0 → transitions to LOADED (filament still present)
+    resp = master.query(slave.addr, Cmd.STOP, bytes([0]))
+    assert resp is not None and resp[0] == Status.OK
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.LOADED
+
+    # LED must now reflect the stored color
+    assert slave.ctrl._leds._modes[0] == LedMode.SOLID, (
+        "LED must be SOLID after slot returns to LOADED"
+    )
+    assert slave.ctrl._leds._colors[0][:3] == (200, 100, 0), (
+        "LED must use the color set during ASSIST"
+    )
+
+
+def test_scenario_10b_color_set_on_idle_slot_during_assist(bus):
+    """
+    Scenario 10 Branch B: SET_FILAMENT_COLOR sent for a *different*, idle
+    (LOADED) slot while slot 0 is in ASSIST.  The idle slot's LED must update
+    immediately; slot 0 must remain completely unaffected.
+
+    Validates:
+    - SET_FILAMENT_COLOR on LOADED slot updates LED immediately
+    - Slot in ASSIST is unaffected by color change on another slot
+    """
+    master, slave = bus
+    slave.inject_filament(0, True)
+    slave.inject_filament(2, True)
+    time.sleep(0.05)
+
+    # Slot 0 in ASSIST
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 0, 150))
+    assert resp is not None and resp[0] == Status.OK
+
+    assist_led_mode = slave.ctrl._leds._modes[0]
+
+    # Set color on slot 2 (LOADED, idle)
+    color_data = bytes([2, 0, 0, 255])  # blue
+    resp = master.query(slave.addr, Cmd.SET_FILAMENT_COLOR, color_data)
+    assert resp is not None and resp[0] == Status.OK
+
+    # Slot 2 LED updated immediately
+    assert slave.ctrl._filament_colors[2] == (0, 0, 255)
+    assert slave.ctrl._leds._modes[2] == LedMode.SOLID
+    assert slave.ctrl._leds._colors[2][:3] == (0, 0, 255)
+
+    # Slot 0 ASSIST LED unchanged
+    assert slave.ctrl._leds._modes[0] == assist_led_mode, (
+        "Slot 0 ASSIST LED must not be affected by color change on slot 2"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 11: Hot-plug — second slave joins active bus
+# Ref: firmware-spec.md §Scenario 11
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_11_hotplug_slave_joins_active_bus(make_slave):
+    """
+    A second slave boots and joins the bus while the first slave is already
+    assigned and being polled normally.
+
+    Validates:
+    - DISCOVER does not disturb an already-assigned slave
+    - Late-joining slave can be enumerated and addressed
+    - Both slaves coexist on the bus after hot-plug
+    """
+    slave1 = make_slave(0x01)
+    slave1.inject_filament(0, True)
+    time.sleep(0.05)
+
+    master1 = BusMaster(slave1)
+
+    # Slave 1 is up and answering normally
+    status = master1.query(slave1.addr, Cmd.GET_STATUS)
+    assert status is not None, "Slave 1 must respond before hot-plug"
+    assert status[0] == SlotState.LOADED, "Slave 1 slot 0 must be LOADED"
+
+    # --- Hot-plug: slave 2 boots unassigned ---
+    slave2 = make_slave()  # addr=0xFF
+
+    multi = BusMasterMulti([slave1, slave2])
+
+    # DISCOVER broadcast — slave 1 must NOT respond (already assigned)
+    multi.send_to_all(Addr.UNASSIGNED, Cmd.DISCOVER)
+    responses = multi.collect_responses(Cmd.DISCOVER, timeout=0.5)
+    assert len(responses) == 1, (
+        f"Only the unassigned slave must respond to DISCOVER, got {len(responses)}"
+    )
+    uid2 = responses[0][1].data
+
+    # Assign address 0x02 to slave 2
+    assign_data = uid2 + bytes([0x02])
+    resp = multi.query_slave(slave2, Addr.UNASSIGNED, Cmd.ASSIGN_ADDR, assign_data)
+    assert resp is not None and resp[0] == Status.OK
+    assert slave2.ctrl._addr == 0x02
+
+    # Both slaves answer GET_STATUS independently
+    status1 = master1.query(slave1.addr, Cmd.GET_STATUS)
+    assert status1 is not None, "Slave 1 must still respond after hot-plug"
+    assert status1[0] == SlotState.LOADED, "Slave 1 state must be unchanged"
+
+    status2 = multi.query_slave(slave2, 0x02, Cmd.GET_STATUS)
+    assert status2 is not None, "Slave 2 must respond after address assignment"
+    assert len(status2) == 6
+
+
+# ---------------------------------------------------------------------------
+# Scenario 12: Short retracts during active print (ASSIST unaffected)
+# Ref: firmware-spec.md §Scenario 12
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_12_short_retracts_do_not_affect_assist(bus):
+    """
+    Short extruder retracts (travel moves) are extruder-only; no RS485 command
+    is sent to the slave.  The slave stays in ASSIST throughout.
+
+    Simulated here by polling GET_STATUS repeatedly without sending any
+    RETRACT command to the slave, verifying ASSIST persists.
+
+    Validates:
+    - Repeated GET_STATUS polls do not change the ASSIST state
+    - No spurious state transitions occur during normal polling
+    """
+    master, slave = bus
+    slave.inject_filament(0, True)
+    time.sleep(0.05)
+
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 0, 150))
+    assert resp is not None and resp[0] == Status.OK
+
+    # Simulate 20 polling cycles (~1 s at 20 Hz) without any motor command
+    for poll in range(20):
+        status = master.query(slave.addr, Cmd.GET_STATUS)
+        assert status is not None, f"Poll {poll}: slave must respond"
+        assert status[0] == SlotState.ASSIST, (
+            f"Poll {poll}: slot 0 must remain ASSIST, got {status[0]}"
+        )
+        time.sleep(0.05)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 13: RETRACT on an idle slot while another is in ASSIST
+# Ref: firmware-spec.md §Scenario 13
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_13_retract_idle_slot_during_assist(bus):
+    """
+    Slot 1 is in ASSIST (active print).  Slot 2 is LOADED (idle spool).
+    Master triggers RETRACT on slot 2 to unload it.
+
+    Validates:
+    - RETRACT on a LOADED slot returns OK while another slot is in ASSIST
+    - GET_STATUS shows ASSIST + RETRACTING simultaneously
+    - Sensor clear on slot 2 transitions it to EMPTY (on_retract_complete)
+    - Slot 1 remains ASSIST throughout
+    """
+    master, slave = bus
+    slave.inject_filament(1, True)
+    slave.inject_filament(2, True)
+    time.sleep(0.05)
+
+    # Slot 1 enters ASSIST
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 1, 150))
+    assert resp is not None and resp[0] == Status.OK
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[1] == SlotState.ASSIST, "Slot 1 must be in ASSIST"
+    assert status[2] == SlotState.LOADED, "Slot 2 must be LOADED"
+
+    # Retract slot 2 while slot 1 is still in ASSIST
+    retract_data = struct.pack("<BH", 2, 1000)
+    resp = master.query(slave.addr, Cmd.RETRACT, retract_data)
+    assert resp is not None and resp[0] == Status.OK, "RETRACT must return OK"
+
+    # Both states visible simultaneously
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[1] == SlotState.ASSIST, "Slot 1 must remain ASSIST during slot 2 retract"
+    assert status[2] == SlotState.RETRACTING, "Slot 2 must be RETRACTING"
+
+    # Simulate filament pulled clear of sensor on slot 2
+    slave.inject_filament(2, False)
+    time.sleep(0.05)  # debounce + sensor_loop → on_retract_complete()
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[1] == SlotState.ASSIST, "Slot 1 must still be ASSIST after slot 2 completes"
+    assert status[2] == SlotState.EMPTY, "Slot 2 must be EMPTY after retract complete"

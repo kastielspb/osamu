@@ -26,7 +26,7 @@
 | Nema 14 stepper motor | 4 | 35 mm, 200 steps/rev, ~0.8 A. Alternative: Nema 17 pancake |
 | MAX485 / SP485 module | 1 | TTL ↔ RS485 transceiver |
 | Microswitch (with roller) | 4 | NO/NC, for filament detection |
-| WS2812B LED strip | 16 LEDs | Cut exactly 16 LEDs (4 per slot) |
+| WS2812B LED strip | 4 | Cut exactly 4 LEDs (1 per slot) |
 | DC-DC step-down (24 V → 5 V) | 1 | Min 3 A (for Pico + LEDs). MP1584 or LM2596 |
 | RJ45 female jack (panel mount) | 2 | IN and OUT |
 | USB-C panel-mount extension | 1 | For firmware updates without disassembly |
@@ -66,56 +66,56 @@
 ```
                     ┌─────────────────────────────────┐
                     │       Raspberry Pi Pico 2       │
-                    │            (RP2350)              │
+                    │            (RP2350)             │
                     │                                 │
-          RS485     │  GP0 (UART0 TX) ──→ MAX485 DI  │
-        transceiver │  GP1 (UART0 RX) ←── MAX485 RO  │
+          RS485     │  GP0 (UART0 TX) ──→ MAX485 DI   │
+        transceiver │  GP1 (UART0 RX) ←── MAX485 RO   │
                     │  GP2 (GPIO OUT) ──→ MAX485 DE+RE│
                     │                                 │
-          TMC UART  │  GP4 (UART1 TX) ──→ TMC PDN    │──┐ 1 kΩ
-                    │  GP5 (UART1 RX) ←──────────────│──┘ (between TX/RX)
+          TMC UART  │  GP4 (UART1 TX) ──→ TMC PDN     │──┐ 1 kΩ
+                    │  GP5 (UART1 RX) ←───────────────│──┘ (between TX/RX)
                     │                                 │
-         Stepper 0  │  GP6  ──→ TMC0 STEP            │
-                    │  GP7  ──→ TMC0 DIR             │
-                    │  GP14 ──→ TMC0 EN              │
+         Stepper 0  │  GP6  ──→ TMC0 STEP             │
+                    │  GP7  ──→ TMC0 DIR              │
+                    │  GP14 ──→ TMC0 EN               │
                     │                                 │
-         Stepper 1  │  GP8  ──→ TMC1 STEP            │
-                    │  GP9  ──→ TMC1 DIR             │
-                    │  GP15 ──→ TMC1 EN              │
+         Stepper 1  │  GP8  ──→ TMC1 STEP             │
+                    │  GP9  ──→ TMC1 DIR              │
+                    │  GP15 ──→ TMC1 EN               │
                     │                                 │
-         Stepper 2  │  GP10 ──→ TMC2 STEP            │
-                    │  GP11 ──→ TMC2 DIR             │
-                    │  GP16 ──→ TMC2 EN              │
+         Stepper 2  │  GP10 ──→ TMC2 STEP             │
+                    │  GP11 ──→ TMC2 DIR              │
+                    │  GP16 ──→ TMC2 EN               │
                     │                                 │
-         Stepper 3  │  GP12 ──→ TMC3 STEP            │
-                    │  GP13 ──→ TMC3 DIR             │
-                    │  GP17 ──→ TMC3 EN              │
+         Stepper 3  │  GP12 ──→ TMC3 STEP             │
+                    │  GP13 ──→ TMC3 DIR              │
+                    │  GP17 ──→ TMC3 EN               │
                     │                                 │
-         Sensors    │  GP18 ←── Microswitch 0 (+ GND)│
-                    │  GP19 ←── Microswitch 1 (+ GND)│
-                    │  GP20 ←── Microswitch 2 (+ GND)│
-                    │  GP21 ←── Microswitch 3 (+ GND)│
+         Sensors    │  GP18 ←── Microswitch 0 (+ GND) │
+                    │  GP19 ←── Microswitch 1 (+ GND) │
+                    │  GP20 ←── Microswitch 2 (+ GND) │
+                    │  GP21 ←── Microswitch 3 (+ GND) │
                     │                                 │
-         LED        │  GP22 ──→ WS2812B DIN          │
+         LED        │  GP22 ──→ WS2812B DIN           │
                     │                                 │
-         Power      │  VSYS ←── 5 V (from DC-DC)     │
-                    │  GND  ←── GND                  │
+         Power      │  VSYS ←── 5 V (from DC-DC)      │
+                    │  GND  ←── GND                   │
                     └─────────────────────────────────┘
 ```
 
 ### 2.2 MAX485 Wiring (RS485 Transceiver)
 
 ```
-MAX485 module          Pico 2            RJ45 Bus
-─────────────          ──────            ────────
-VCC ←───────────────── 3V3
-GND ←───────────────── GND ──────────── Pin 3, 6 (GND)
-DI  ←───────────────── GP0 (TX)
-RO  ────────────────→  GP1 (RX)
-DE  ←───────────────── GP2
-RE  ←───────────────── GP2  (DE and RE tied together!)
-A   ─────────────────────────────────── Pin 4 (RS485 A)
-B   ─────────────────────────────────── Pin 5 (RS485 B)
+MAX485 module         Pico 2            RJ45 Bus
+─────────────         ──────            ────────
+VCC ───────────────── 3V3
+GND ───────────────── GND ───────────── Pin 3, 6 (GND)
+DI  ───────────────── GP0 (TX)
+RO  ───────────────── GP1 (RX)
+DE  ───────────────── GP2
+RE  ───────────────── GP2 (DE and RE tied together!)
+A   ────────────────────────────────── Pin 4 (RS485 A)
+B   ────────────────────────────────── Pin 5 (RS485 B)
 ```
 
 > **Important:** DE and RE pins on the MAX485 are connected together and driven by a single GPIO. HIGH = transmit, LOW = receive.
@@ -127,14 +127,14 @@ All four TMC2209 modules wire the same way; only STEP/DIR/EN pins and the MS1/MS
 ```
 TMC2209 StepStick      Connection
 ─────────────────      ──────────
-VMOT ←─────────────── +24 V (from RJ45 bus, pins 1, 2)
-GND  ←─────────────── GND
-VIO  ←─────────────── 3V3 (from Pico)
-STEP ←─────────────── GP6 / GP8 / GP10 / GP12 (by slot)
-DIR  ←─────────────── GP7 / GP9 / GP11 / GP13 (by slot)
-EN   ←─────────────── GP14 / GP15 / GP16 / GP17 (by slot)
-PDN/UART ←──────────── GP4 (shared UART TX, via 1 kΩ)
-          ──────────→ GP5 (UART RX, same 1 kΩ)
+VMOT ──────────────── +24 V (from RJ45 bus, pins 1, 2)
+GND  ──────────────── GND
+VIO  ──────────────── 3V3 (from Pico)
+STEP ──────────────── GP6 / GP8 / GP10 / GP12 (by slot)
+DIR  ──────────────── GP7 / GP9 / GP11 / GP13 (by slot)
+EN   ──────────────── GP14 / GP15 / GP16 / GP17 (by slot)
+PDN/UART ──────────── GP4 (shared UART TX, via 1 kΩ)
+         ──────────── GP5 (UART RX, same 1 kΩ)
 
 MS1, MS2 set UART address:
   TMC0: MS1=GND,  MS2=GND   → addr 0
@@ -148,7 +148,7 @@ DIAG — leave unconnected (or to a spare GPIO for future hardware StallGuard IR
 **TMC UART single-wire shared bus:**
 
 ```
-GP4 (TX) ───[1 kΩ]───┬──── TMC0 PDN
+GP4 (TX) ───[1 kΩ]────┬──── TMC0 PDN
                       ├──── TMC1 PDN
                       ├──── TMC2 PDN
                       └──── TMC3 PDN
@@ -177,9 +177,9 @@ When pressed (filament pushes lever): contact closes → GPIO = LOW → filament
 ```
 WS2812B strip     Connection
 ─────────────     ──────────
-VCC (5 V)  ←────── 5 V (from DC-DC)
-GND        ←────── GND
-DIN        ←────── GP22
+VCC (5 V)  ────── 5 V (from DC-DC)
+GND        ────── GND
+DIN        ────── GP22
 ```
 
 > First 4 LEDs = slot 0, next 4 = slot 1, etc. Cut exactly 16 LEDs.
@@ -188,12 +188,12 @@ DIN        ←────── GP22
 
 ```
 RJ45 pins 1, 2 (+24 V) ──→ VMOT of all TMC2209 (with 100 µF cap per driver)
-                        ──→ DC-DC input (24 V → 5 V)
+                       ──→ DC-DC input (24 V → 5 V)
 
-DC-DC 5 V output ──→ Pico VSYS
-                 ──→ WS2812B VCC
+DC-DC 5 V output       ──→ Pico VSYS
+                       ──→ WS2812B VCC
 
-RJ45 pins 3, 6 (GND) ──→ Common ground for the whole box
+RJ45 pins 3, 6 (GND)   ──→ Common ground for the whole box
 ```
 
 > **Capacitors:** 100 µF electrolytic + 100 nF ceramic next to each TMC2209 between VMOT and GND. These are mandatory — without them drivers will overheat or reset.
@@ -206,12 +206,12 @@ Both RJ45 jacks are wired in parallel (all matching pins bridged):
 RJ45 IN (from master / previous slave)     RJ45 OUT (to next slave)
 Pin 1 ────────────────────────────────────── Pin 1  (+24 V)
 Pin 2 ────────────────────────────────────── Pin 2  (+24 V)
-Pin 3 ────────────────────────────────────── Pin 3  (GND)
+Pin 3 ────────────────────────────────────── Pin 3  (+24 V)
 Pin 4 ────────────────────────────────────── Pin 4  (RS485 A)
 Pin 5 ────────────────────────────────────── Pin 5  (RS485 B)
 Pin 6 ────────────────────────────────────── Pin 6  (GND)
-Pin 7 ────────────────────────────────────── Pin 7  (GND/+24 V)
-Pin 8 ────────────────────────────────────── Pin 8  (GND/+24 V)
+Pin 7 ────────────────────────────────────── Pin 7  (GND)
+Pin 8 ────────────────────────────────────── Pin 8  (GND)
 ```
 
 ---
@@ -223,19 +223,19 @@ Pin 8 ────────────────────────�
 ```
                     ┌─────────────────────────────────┐
                     │       Raspberry Pi Pico 2       │
-                    │        (Master, RP2350)          │
+                    │        (Master, RP2350)         │
                     │                                 │
-          RS485     │  GP0 (UART0 TX) ──→ MAX485 DI  │
-        transceiver │  GP1 (UART0 RX) ←── MAX485 RO  │
+          RS485     │  GP0 (UART0 TX) ──→ MAX485 DI   │
+        transceiver │  GP1 (UART0 RX) ←── MAX485 RO   │
                     │  GP2 (GPIO OUT) ──→ MAX485 DE+RE│
                     │                                 │
-         Sensor     │  GP3 (GPIO IN)  ←── Microswitch │
-                    │                  (+ GND)        │
+          Sensor    │  GP3 (GPIO IN)  ←── Microswitch │
+                    │                     (+ GND)     │
                     │                                 │
-         USB-C      │  USB ────────────→ Klipper Host │
+          USB-C     │  USB ────────────→ Klipper Host │
                     │                                 │
-         Power      │  VBUS ←── 5 V (from USB host)  │
-                    │  GND  ←── GND                  │
+          Power     │  VBUS ←── 5 V (from USB host)   │
+                    │  GND  ←── GND                   │
                     └─────────────────────────────────┘
 ```
 
