@@ -65,11 +65,7 @@ for _shim_name in ("machine", "uasyncio", "rp2", "urandom"):
 # ---------------------------------------------------------------------------
 from bus.protocol import (  # noqa: E402
     Addr,
-    Cmd,
     FrameReader,
-    LedMode,
-    SlotState,
-    Status,
     build_frame,
 )
 from state_machine import SlaveController  # noqa: E402

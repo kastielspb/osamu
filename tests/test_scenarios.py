@@ -24,15 +24,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from e2e_harness import (  # noqa: E402
-    Addr,
-    BusMasterMulti,
-    Cmd,
-    LedMode,
-    SlotState,
-    Status,
-    _load_cfg,
-)
+from bus.protocol import Addr, Cmd, LedMode, SlotState, Status  # noqa: E402
+from e2e_harness import BusMasterMulti, _load_cfg  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Scenario 1: System Initialisation (MMU_HOME)
