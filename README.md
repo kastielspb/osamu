@@ -70,19 +70,19 @@ A single RJ45 cable carries ~6 A @ 24 V (≈144 W), enough for 4× Nema 14 motor
 
 | Cmd | Name | Purpose |
 |---|---|---|
-| `0x01` | `PING` | Presence check, returns firmware version |
-| `0x02` | `DISCOVER` | Broadcast — find unassigned slaves |
-| `0x03` | `ASSIGN_ADDR` | Assign address by unique ID (saved to flash) |
-| `0x04` | `GET_STATUS` | Poll all slot states and error flags |
-| `0x05` | `FEED` | Push filament toward extruder |
-| `0x06` | `RETRACT` | Pull filament back |
-| `0x07` | `SET_ASSIST` | Enable low-current friction-compensation mode |
-| `0x08` | `STOP` | Stop a single slot motor |
-| `0x09` | `STOP_ALL` | Emergency stop all motors |
-| `0x0A` | `SET_LED` | Control per-slot RGB LEDs |
-| `0x0B` | `GET_CONFIG` | Read UID, address, firmware version, slot count |
-| `0x0C` | `SET_CURRENT` | Tune TMC run/hold current |
-| `0x0D` | `HOME_SLOT` | Feed until filament sensor triggers |
+| `0x01` | `DISCOVER` | Broadcast — find unassigned slaves |
+| `0x02` | `ASSIGN_ADDR` | Assign address by unique ID (saved to flash) |
+| `0x03` | `PING` | Presence check, returns firmware version |
+| `0x04` | `GET_CONFIG` | Read UID, address, firmware version, slot count |
+| `0x05` | `GET_STATUS` | Poll all slot states and error flags |
+| `0x06` | `SET_FILAMENT` | Set per-slot filament color and material |
+| `0x07` | `SET_CURRENT` | Tune TMC run/hold current |
+| `0x08` | `HOME_SLOT` | Feed until filament sensor triggers |
+| `0x09` | `FEED` | Push filament toward extruder |
+| `0x0A` | `SET_ASSIST` | Enable low-current friction-compensation mode |
+| `0x0B` | `RETRACT` | Pull filament back |
+| `0x0C` | `STOP` | Stop a single slot motor |
+| `0x0D` | `STOP_ALL` | Emergency stop all motors |
 
 ### Slot States
 

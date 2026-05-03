@@ -237,17 +237,6 @@ def test_stop_after_feed():
     assert ctrl._slots[0].state == SlotState.LOADED
 
 
-def test_set_led_direct():
-    """CMD_SET_LED sets mode and color for a slot."""
-    ctrl = _make_controller()
-    data = bytes([int(LedMode.SOLID), 0, 255, 0, 0])  # solid red on slot 0
-    resp = _send_frame(ctrl, Cmd.SET_LED, data)
-    frame = _parse_response(resp)
-    assert frame.data[0] == Status.OK
-    assert ctrl._leds._modes[0] == LedMode.SOLID
-    assert ctrl._leds._colors[0][:3] == (255, 0, 0)
-
-
 def test_set_current():
     ctrl = _make_controller()
     data = struct.pack("<BHH", 1, 600, 100)  # slot=1, run=600mA, hold=100mA
@@ -256,48 +245,48 @@ def test_set_current():
     assert frame.data[0] == Status.OK
 
 
-def test_set_filament_color_idle_slot():
-    """SET_FILAMENT_COLOR stores color; LED stays off if slot is EMPTY."""
+def test_set_filament_idle_slot():
+    """SET_FILAMENT stores filament info; LED stays off if slot is EMPTY."""
     ctrl = _make_controller()
-    data = bytes([2, 255, 128, 0])  # slot=2, orange
-    resp = _send_frame(ctrl, Cmd.SET_FILAMENT_COLOR, data)
+    data = bytes([2, 255, 128, 0]) + b"PETG"  # slot=2, orange, PETG
+    resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.OK
-    assert ctrl._filament_colors[2] == (255, 128, 0)
+    assert ctrl._filament_info[2] == (255, 128, 0, b"PETG")
     # Slot is EMPTY, so LED should still be off
     assert ctrl._leds._modes[2] == LedMode.OFF
 
 
-def test_set_filament_color_loaded_slot():
-    """SET_FILAMENT_COLOR on a LOADED slot updates the LED immediately."""
+def test_set_filament_loaded_slot():
+    """SET_FILAMENT on a LOADED slot updates the LED immediately."""
     ctrl = _make_controller()
     # Force slot 1 into LOADED state
     ctrl._sensors.sensors[1]._state = True
     ctrl._slots[1].update_from_sensor()
     assert ctrl._slots[1].state == SlotState.LOADED
 
-    data = bytes([1, 0, 0, 255])  # slot=1, blue
-    resp = _send_frame(ctrl, Cmd.SET_FILAMENT_COLOR, data)
+    data = bytes([1, 0, 0, 255]) + b"PLA\x00"  # slot=1, blue, PLA
+    resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.OK
-    assert ctrl._filament_colors[1] == (0, 0, 255)
+    assert ctrl._filament_info[1] == (0, 0, 255, b"PLA")
     # LED should immediately reflect the new color
     assert ctrl._leds._modes[1] == LedMode.SOLID
     assert ctrl._leds._colors[1][:3] == (0, 0, 255)
 
 
-def test_set_filament_color_invalid_slot():
+def test_set_filament_invalid_slot():
     ctrl = _make_controller()
-    data = bytes([7, 255, 0, 0])  # slot=7, invalid
-    resp = _send_frame(ctrl, Cmd.SET_FILAMENT_COLOR, data)
+    data = bytes([7, 255, 0, 0]) + b"PLA\x00"  # slot=7, invalid
+    resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.ERROR_INVALID_SLOT
 
 
-def test_set_filament_color_short_payload():
+def test_set_filament_short_payload():
     ctrl = _make_controller()
-    data = bytes([0, 255])  # only 2 bytes, need 4
-    resp = _send_frame(ctrl, Cmd.SET_FILAMENT_COLOR, data)
+    data = bytes([0, 255])  # only 2 bytes, need 8
+    resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.ERROR_INVALID_SLOT
 
@@ -310,10 +299,10 @@ def test_unknown_command():
 
 
 def test_loaded_led_uses_filament_color():
-    """Default filament color (green) used when slot transitions to LOADED."""
+    """Default filament info (green, no material) used when slot transitions to LOADED."""
     ctrl = _make_controller()
-    # Slot 3 starts EMPTY with default green color (0, 255, 0)
-    assert ctrl._filament_colors[3] == (0, 255, 0)
+    # Slot 3 starts EMPTY with default green (0, 255, 0, b"")
+    assert ctrl._filament_info[3] == (0, 255, 0, b"")
 
     # Trigger sensor → update_from_sensor → LOADED
     ctrl._sensors.sensors[3]._state = True

@@ -175,14 +175,14 @@ def test_feed_python_to_c():
 
 
 @skip_no_gcc
-def test_set_filament_color_python_to_c():
-    data = bytes([0, 255, 128, 0])  # slot=0, R=255, G=128, B=0
-    py_frame = build_frame(0x01, Cmd.SET_FILAMENT_COLOR, 0x01, data)
+def test_set_filament_python_to_c():
+    data = bytes([0, 255, 128, 0]) + b"PLA\x00"  # slot=0, R=255, G=128, B=0, material=PLA
+    py_frame = build_frame(0x01, Cmd.SET_FILAMENT, 0x01, data)
     consumed, parsed = _c_parse_frame(py_frame)
     assert consumed == len(py_frame)
-    assert (parsed.cmd & 0x7F) == int(Cmd.SET_FILAMENT_COLOR)
-    assert parsed.data_len == 4
-    assert bytes(parsed.data[:4]) == data
+    assert (parsed.cmd & 0x7F) == int(Cmd.SET_FILAMENT)
+    assert parsed.data_len == 8
+    assert bytes(parsed.data[:8]) == data
 
 
 @skip_no_gcc

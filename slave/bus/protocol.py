@@ -25,20 +25,33 @@ class CmdDir(IntEnum):
 
 
 class Cmd(IntEnum):
-    PING = 0x01
-    DISCOVER = 0x02
-    ASSIGN_ADDR = 0x03
-    GET_STATUS = 0x04
-    FEED = 0x05
-    RETRACT = 0x06
-    SET_ASSIST = 0x07
-    STOP = 0x08
-    STOP_ALL = 0x09
-    SET_LED = 0x0A
-    GET_CONFIG = 0x0B
-    SET_CURRENT = 0x0C
-    HOME_SLOT = 0x0D
-    SET_FILAMENT_COLOR = 0x0E
+    DISCOVER = 0x01
+    ASSIGN_ADDR = 0x02
+    PING = 0x03
+    GET_CONFIG = 0x04
+    GET_STATUS = 0x05
+    SET_FILAMENT = 0x06
+    SET_CURRENT = 0x07
+    HOME_SLOT = 0x08
+    FEED = 0x09
+    SET_ASSIST = 0x0A
+    RETRACT = 0x0B
+    STOP = 0x0C
+    STOP_ALL = 0x0D
+
+
+class FilamentMaterial:
+    """4-byte NUL-padded ASCII material tag helpers."""
+
+    @staticmethod
+    def encode(name: str) -> bytes:
+        """Encode a material name string to a 4-byte wire value."""
+        return name[:4].encode("ascii", errors="replace").ljust(4, b"\x00")
+
+    @staticmethod
+    def decode(raw: bytes) -> bytes:
+        """Strip trailing NUL bytes from a received 4-byte material field."""
+        return raw[:4].rstrip(b"\x00")
 
 
 class Status(IntEnum):

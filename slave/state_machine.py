@@ -66,8 +66,8 @@ class SlaveController:
             for i in range(4)
         ]
 
-        # Per-slot filament colors (r, g, b); default green
-        self._filament_colors = [(0, 255, 0)] * 4
+        # Per-slot filament info (r, g, b, material); default green, unknown material
+        self._filament_data = [(0, 255, 0, b"")] * 4
 
         # Watchdog
         self._last_poll_time = time.ticks_ms()
@@ -168,6 +168,7 @@ class SlaveController:
         elif cmd == Cmd.FEED:
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
             speed = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
             if not (0 <= slot < 4):
@@ -219,15 +220,6 @@ class SlaveController:
                 self._update_slot_led(i)
             return bytes([Status.OK])
 
-        elif cmd == Cmd.SET_LED:
-            if len(data) < 5:
-                return bytes([Status.ERROR_INVALID_SLOT])
-            mode, slot, r, g, b = data[0], data[1], data[2], data[3], data[4]
-            if not (0 <= slot < 4):
-                return bytes([Status.ERROR_INVALID_SLOT])
-            self._leds.set_slot(slot, mode, r, g, b)
-            return bytes([Status.OK])
-
         elif cmd == Cmd.GET_CONFIG:
             # Return: unique_id(8) + addr(1) + fw_ver(2) + num_slots(1)
             config = (
@@ -259,13 +251,14 @@ class SlaveController:
             status = self._slots[slot].feed()
             return bytes([status])
 
-        elif cmd == Cmd.SET_FILAMENT_COLOR:
-            if len(data) < 4:
+        elif cmd == Cmd.SET_FILAMENT:
+            if len(data) < 8:
                 return bytes([Status.ERROR_INVALID_SLOT])
             slot, r, g, b = data[0], data[1], data[2], data[3]
+            material = data[4:8].rstrip(b"\x00")
             if not (0 <= slot < 4):
                 return bytes([Status.ERROR_INVALID_SLOT])
-            self._filament_colors[slot] = (r, g, b)
+            self._filament_data[slot] = (r, g, b, material)
             if self._slots[slot].state == SlotState.LOADED:
                 self._update_slot_led(slot)
             return bytes([Status.OK])
@@ -279,7 +272,7 @@ class SlaveController:
         if state == SlotState.EMPTY:
             self._leds.set_slot(slot, LedMode.OFF)
         elif state == SlotState.LOADED:
-            r, g, b = self._filament_colors[slot]
+            r, g, b, _ = self._filament_data[slot]
             self._leds.set_slot(slot, LedMode.SOLID, r, g, b)
         elif state in (SlotState.FEEDING, SlotState.RETRACTING):
             self._leds.set_feeding(slot)

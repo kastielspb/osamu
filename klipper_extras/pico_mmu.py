@@ -16,20 +16,19 @@ class PicoMmuError(Exception):
 
 # --- Protocol constants (mirror of slave/bus/protocol.py) ---
 class Cmd(IntEnum):
-    PING = 0x01
-    DISCOVER = 0x02
-    ASSIGN_ADDR = 0x03
-    GET_STATUS = 0x04
-    FEED = 0x05
-    RETRACT = 0x06
-    SET_ASSIST = 0x07
-    STOP = 0x08
-    STOP_ALL = 0x09
-    SET_LED = 0x0A
-    GET_CONFIG = 0x0B
-    SET_CURRENT = 0x0C
-    HOME_SLOT = 0x0D
-    SET_FILAMENT_COLOR = 0x0E
+    DISCOVER = 0x01
+    ASSIGN_ADDR = 0x02
+    PING = 0x03
+    GET_CONFIG = 0x04
+    GET_STATUS = 0x05
+    SET_FILAMENT = 0x06
+    SET_CURRENT = 0x07
+    HOME_SLOT = 0x08
+    FEED = 0x09
+    SET_ASSIST = 0x0A
+    RETRACT = 0x0B
+    STOP = 0x0C
+    STOP_ALL = 0x0D
 
 
 class Status(IntEnum):
@@ -126,20 +125,22 @@ class PicoMmu:
                 slave_config = config.getsection(section)
                 self.slaves.append(PicoMmuSlave(slave_config))
 
-        # Build per-tool color map (global tool number -> (r, g, b))
+        # Build per-tool filament map (global tool number -> (r, g, b, material))
         # Defaults come from printer.cfg; saved overrides are loaded below
-        self._tool_colors = {}
+        self._tool_filaments = {}
         for slave in self.slaves:
             for global_slot, color in zip(slave.slots, slave.slot_colors):
-                self._tool_colors[global_slot] = color
+                r, g, b = color
+                self._tool_filaments[global_slot] = (r, g, b, "")
 
-        # Load persisted color overrides from [save_variables]
+        # Load persisted filament overrides from [save_variables]
         svars = self.printer.lookup_object("save_variables", None)
         if svars is not None:
-            saved = svars.get_status(None)["variables"].get("mmu_tool_colors", {})
+            saved = svars.get_status(None)["variables"].get("mmu_tool_filaments", {})
             for k, v in saved.items():
                 try:
-                    self._tool_colors[int(k)] = (int(v[0]), int(v[1]), int(v[2]))
+                    mat = str(v[3]) if len(v) > 3 else ""
+                    self._tool_filaments[int(k)] = (int(v[0]), int(v[1]), int(v[2]), mat)
                 except (ValueError, IndexError, TypeError):
                     pass
 
@@ -198,9 +199,9 @@ class PicoMmu:
             "MMU_SELECT", self.cmd_MMU_SELECT, desc="Select tool without loading"
         )
         self.gcode.register_command(
-            "MMU_SET_FILAMENT_COLOR",
-            self.cmd_MMU_SET_FILAMENT_COLOR,
-            desc="Set filament color for a tool slot",
+            "MMU_SET_FILAMENT",
+            self.cmd_MMU_SET_FILAMENT,
+            desc="Set filament color and material for a tool slot",
         )
 
     def _handle_connect(self):
@@ -300,12 +301,13 @@ class PicoMmu:
                     self.gcode.respond_info(
                         f"MMU: Slave {slave.unique_id.hex()} assigned addr {next_addr}"
                     )
-                    # Push stored filament colors to the slave
+                    # Push stored filament info to the slave
                     for j, global_slot in enumerate(slave.slots):
-                        if global_slot in self._tool_colors:
-                            r, g, b = self._tool_colors[global_slot]
+                        if global_slot in self._tool_filaments:
+                            r, g, b, mat = self._tool_filaments[global_slot]
+                            mat_bytes = mat[:4].encode("ascii", errors="replace").ljust(4, b"\x00")
                             self._rs485_send(
-                                slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([j, r, g, b])
+                                slave.addr, Cmd.SET_FILAMENT, bytes([j, r, g, b]) + mat_bytes
                             )
                 next_addr += 1
         self._build_slot_groups()
@@ -329,13 +331,14 @@ class PicoMmu:
         explicit = self._slot_groups
         max_explicit = max(explicit.values(), default=0) if explicit else 0
 
-        # Collect ungrouped tools per color.
+        # Collect ungrouped tools per (color, material) key.
         color_tools: dict = {}
-        for tool, color in self._tool_colors.items():
+        for tool, filament in self._tool_filaments.items():
             if explicit.get(tool, 0) == 0:  # not explicitly assigned
-                if color not in color_tools:
-                    color_tools[color] = []
-                color_tools[color].append(tool)
+                key = filament  # (r, g, b, material) — full identity
+                if key not in color_tools:
+                    color_tools[key] = []
+                color_tools[key].append(tool)
 
         # Assign synthetic group IDs to colors shared by ≥2 ungrouped tools.
         auto: dict = {}
@@ -656,10 +659,11 @@ class PicoMmu:
         except ValueError:
             raise ValueError("Invalid hex color '%s'" % hex_str)
 
-    def cmd_MMU_SET_FILAMENT_COLOR(self, gcmd):
-        """MMU_SET_FILAMENT_COLOR TOOL=N COLOR=RRGGBB: Set filament color for a slot."""
+    def cmd_MMU_SET_FILAMENT(self, gcmd):
+        """MMU_SET_FILAMENT TOOL=N COLOR=RRGGBB [MATERIAL=name]: Set filament for a slot."""
         tool = gcmd.get_int("TOOL")
         color_str = gcmd.get("COLOR")
+        material = gcmd.get("MATERIAL", "")[:4]
         if tool < 0 or tool >= self.tool_count:
             raise gcmd.error("MMU: Invalid tool number T%d" % tool)
         try:
@@ -671,18 +675,19 @@ class PicoMmu:
             raise gcmd.error("MMU: Tool T%d not configured" % tool)
         if not slave.online:
             raise gcmd.error("MMU: Slave for T%d is offline" % tool)
-        self._tool_colors[tool] = (r, g, b)
+        self._tool_filaments[tool] = (r, g, b, material)
         self._build_slot_groups()
-        self._rs485_send(slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([local_slot, r, g, b]))
+        mat_bytes = material.encode("ascii", errors="replace").ljust(4, b"\x00")
+        self._rs485_send(slave.addr, Cmd.SET_FILAMENT, bytes([local_slot, r, g, b]) + mat_bytes)
         # Persist overrides via [save_variables]
         svars = self.printer.lookup_object("save_variables", None)
         if svars is not None:
-            saved = dict(svars.get_status(None)["variables"].get("mmu_tool_colors", {}))
-            saved[str(tool)] = [r, g, b]
-            svars.allVariables["mmu_tool_colors"] = saved
+            saved = dict(svars.get_status(None)["variables"].get("mmu_tool_filaments", {}))
+            saved[str(tool)] = [r, g, b, material]
+            svars.allVariables["mmu_tool_filaments"] = saved
             svars._write_file()
         canon = color_str.lstrip("#").upper()
-        gcmd.respond_info("MMU: Tool T%d color set to #%s" % (tool, canon))
+        gcmd.respond_info("MMU: Tool T%d set to #%s material=%s" % (tool, canon, material or "?"))
 
 
 def load_config(config):

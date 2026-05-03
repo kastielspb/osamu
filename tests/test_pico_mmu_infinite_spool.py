@@ -55,7 +55,7 @@ class FakeSlave:
 def make_mmu(
     *,
     slot_groups=None,
-    tool_colors=None,
+    tool_filaments=None,
     slaves=None,
     state=STATE_PRINTING,
     current_tool=0,
@@ -65,7 +65,7 @@ def make_mmu(
     """
     mmu = PicoMmu.__new__(PicoMmu)
     mmu._slot_groups = slot_groups or {}
-    mmu._tool_colors = tool_colors or {}
+    mmu._tool_filaments = tool_filaments or {}
     mmu._effective_groups = {}
     mmu._runout_scheduled = False
     mmu.state = state
@@ -85,7 +85,12 @@ def test_build_groups_explicit():
     """slot_groups: 1,0,1,0 → T0 and T2 in group 1; T1 and T3 ungrouped."""
     mmu = make_mmu(
         slot_groups={0: 1, 1: 0, 2: 1, 3: 0},
-        tool_colors={0: (255, 0, 0), 1: (0, 255, 0), 2: (255, 0, 0), 3: (0, 255, 0)},
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (0, 255, 0, "PLA"),
+            2: (255, 0, 0, "PLA"),
+            3: (0, 255, 0, "PLA"),
+        },
     )
     mmu._build_slot_groups()
 
@@ -103,15 +108,15 @@ def test_build_groups_explicit():
 
 def test_build_groups_auto_color():
     """
-    No explicit groups.  Tools sharing the same color are auto-grouped when
-    two or more tools share that color.
+    No explicit groups.  Tools sharing the same color AND material are
+    auto-grouped when two or more tools share that identity.
     """
     mmu = make_mmu(
-        tool_colors={
-            0: (255, 0, 0),  # red
-            1: (0, 255, 0),  # green
-            2: (255, 0, 0),  # red — same as T0
-            3: (0, 255, 0),  # green — same as T1
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),  # red PLA
+            1: (0, 255, 0, "PLA"),  # green PLA
+            2: (255, 0, 0, "PLA"),  # red PLA — same as T0
+            3: (0, 255, 0, "PLA"),  # green PLA — same as T1
         },
     )
     mmu._build_slot_groups()
@@ -129,15 +134,33 @@ def test_build_groups_auto_color():
 
 
 def test_build_groups_unique_color_not_grouped():
-    """A tool with a unique color must NOT be auto-grouped (it has no partner)."""
+    """A tool with a unique (color, material) identity must NOT be auto-grouped."""
     mmu = make_mmu(
-        tool_colors={0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255)},
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (0, 255, 0, "PLA"),
+            2: (0, 0, 255, "PLA"),
+        },
     )
     mmu._build_slot_groups()
 
     assert mmu._get_group(0) is None
     assert mmu._get_group(1) is None
     assert mmu._get_group(2) is None
+
+
+def test_build_groups_same_color_different_material_not_grouped():
+    """Same color but different material must NOT auto-group (e.g. red PLA vs red PETG)."""
+    mmu = make_mmu(
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (255, 0, 0, "PETG"),
+        },
+    )
+    mmu._build_slot_groups()
+
+    assert mmu._get_group(0) is None, "Red PLA must not group with red PETG"
+    assert mmu._get_group(1) is None, "Red PETG must not group with red PLA"
 
 
 # ---------------------------------------------------------------------------
@@ -148,11 +171,15 @@ def test_build_groups_unique_color_not_grouped():
 def test_build_groups_explicit_overrides_color():
     """
     T0 has explicit group 0 (ungrouped) and T2 has explicit group 0.
-    Even though T0 and T2 share a color they must NOT be auto-grouped.
+    Even though T0 and T2 share a color+material they must NOT be auto-grouped.
     """
     mmu = make_mmu(
         slot_groups={0: 0, 2: 0},
-        tool_colors={0: (255, 0, 0), 1: (0, 255, 0), 2: (255, 0, 0)},
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (0, 255, 0, "PLA"),
+            2: (255, 0, 0, "PLA"),
+        },
     )
     mmu._build_slot_groups()
 
@@ -169,7 +196,11 @@ def test_build_groups_explicit_nonzero_overrides_auto():
     """
     mmu = make_mmu(
         slot_groups={0: 5},
-        tool_colors={0: (255, 0, 0), 1: (255, 0, 0), 2: (0, 255, 0)},
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (255, 0, 0, "PLA"),
+            2: (0, 255, 0, "PLA"),
+        },
     )
     mmu._build_slot_groups()
 

@@ -16,6 +16,17 @@ Interaction: Klipper extras ↔ Master MCU (USB CDC, Klipper protocol) ↔ Slave
 
 ## Sequence Diagrams
 
+Scenarios are grouped by concern:
+
+- **Setup & Bus Management** — Scenarios 1–2
+- **Core Print Operations** — Scenarios 3–7
+- **Filament Metadata** — Scenarios 8–12
+- **Fault Handling** — Scenarios 13–15
+- **Infinite Spool & Runout Recovery** — Scenarios 16–17
+- **Architecture Reference** — Scenario 18 (no test)
+
+---
+
 ### Scenario 1: System Initialisation (MMU_HOME)
 
 ```mermaid
@@ -71,7 +82,84 @@ sequenceDiagram
     E-->>K: "MMU: Home complete. 2 slaves online."
 ```
 
-### Scenario 2: Tool Change (T0 → T1)
+### Scenario 2: Hot-Plug — Second Slave Joins Active Bus
+
+**Context:** The system is running normally with Slave 1 assigned and being polled at 20 Hz. A second slave box is powered on mid-session and needs to join the bus without interrupting ongoing operations.
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S1 as Slave 1 (addr=0x01, active)
+    participant S2 as Slave 2 (addr=0xFF, just powered on)
+
+    Note over S1: ASSIST on slot 0, being polled normally
+    Note over S2: Boot — addr = 0xFF (unassigned)
+
+    loop Normal polling (continues throughout)
+        E->>M: rs485_query(addr=1, GET_STATUS)
+        M->>S1: GET_STATUS
+        S1-->>M: [ASSIST, LOADED, EMPTY, EMPTY][sensors][errors]
+        M-->>E: OK
+    end
+
+    Note over E: User triggers MMU_HOME (or extras detects new UID in DISCOVER sweep)
+
+    E->>M: rs485_send(addr=0xFF, DISCOVER)
+    M->>S1: DISCOVER
+    M->>S2: DISCOVER
+    Note over S1: addr=0x01 ≠ 0xFF → address filter drops frame, no response
+    Note over S2: addr=0xFF == own addr → random backoff, then respond
+    S2-->>M: [unique_id_2]
+    M-->>E: unique_id_2
+
+    Note over E: unique_id_2 matched to [pico_mmu_slave box_1] in printer.cfg
+
+    E->>M: rs485_send(addr=0xFF, ASSIGN_ADDR, uid_2 + 0x02)
+    M->>S2: ASSIGN_ADDR
+    S2-->>M: [status: OK]
+    Note over S2: addr saved to flash → addr = 0x02
+
+    E->>M: rs485_query(addr=2, GET_STATUS)
+    M->>S2: GET_STATUS
+    S2-->>M: [LOADED, EMPTY, EMPTY, EMPTY][sensors][errors]
+    M-->>E: slave 2 online ✓
+
+    Note over E: Both slaves now polled independently
+    Note over S1: Slot 0 still ASSIST — unaffected by discovery traffic ✓
+```
+
+**Key invariant:** An already-assigned slave ignores `DISCOVER` because its address filter rejects `addr=0xFF` frames (it only processes frames addressed to its own address, broadcast `0x00`, or `DISCOVER`/`ASSIGN_ADDR` when `addr == 0xFF`).
+
+---
+
+### Scenario 3: Normal Polling (during print)
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S1 as Slave 1 (active)
+    participant S2 as Slave 2 (idle)
+
+    loop Every 50 ms (~20 Hz)
+        E->>M: rs485_query(addr=1, GET_STATUS)
+        M->>S1: GET_STATUS
+        S1-->>M: [EMPTY, ASSIST, LOADED, EMPTY][0x02][0x00]
+        M-->>E: slot_states OK
+        Note over E: Slot 1 in ASSIST — nominal
+
+        E->>M: rs485_query(addr=2, GET_STATUS)
+        M->>S2: GET_STATUS
+        S2-->>M: [LOADED, LOADED, EMPTY, EMPTY][0x03][0x00]
+        M-->>E: slot_states OK
+    end
+
+    Note over S1: Watchdog reset (last_poll = now)
+    Note over S2: Watchdog reset (last_poll = now)
+```
+
+### Scenario 4: Tool Change (T0 → T1)
 
 ```mermaid
 sequenceDiagram
@@ -154,388 +242,7 @@ sequenceDiagram
     K->>Slicer: Resume print
 ```
 
-### Scenario 3: Normal Polling (during print)
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S1 as Slave 1 (active)
-    participant S2 as Slave 2 (idle)
-
-    loop Every 50 ms (~20 Hz)
-        E->>M: rs485_query(addr=1, GET_STATUS)
-        M->>S1: GET_STATUS
-        S1-->>M: [EMPTY, ASSIST, LOADED, EMPTY][0x02][0x00]
-        M-->>E: slot_states OK
-        Note over E: Slot 1 in ASSIST — nominal
-
-        E->>M: rs485_query(addr=2, GET_STATUS)
-        M->>S2: GET_STATUS
-        S2-->>M: [LOADED, LOADED, EMPTY, EMPTY][0x03][0x00]
-        M-->>E: slot_states OK
-    end
-
-    Note over S1: Watchdog reset (last_poll = now)
-    Note over S2: Watchdog reset (last_poll = now)
-```
-
-### Scenario 4: Jam Detection
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S as Slave Box 0
-    participant TMC as TMC2209 (slot 1)
-    participant K as Klipper Host
-
-    Note over S: Slot 1 in FEEDING state
-    Note over S: StallGuard polled every 200 ms
-
-    S->>TMC: read SG_RESULT
-    TMC-->>S: SG_RESULT = 8 (threshold = 20)
-    Note over S: SG_RESULT < THRESHOLD → JAM!
-    Note over S: Motor 1: STOP
-    Note over S: Slot 1: state = ERROR(JAM)
-    Note over S: LED slot 1: red blinking
-
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    M->>S: GET_STATUS
-    S-->>M: [EMPTY, ERROR, LOADED, EMPTY][0x04][0x03]
-    M-->>E: slot 1 = ERROR, error_code = JAM
-
-    Note over E: JAM error detected!
-    E->>M: rs485_send(addr=1, STOP_ALL)
-    M->>S: STOP_ALL
-    S-->>M: OK
-    Note over S: All motors stopped
-
-    E->>K: PAUSE (pause print)
-    E->>K: RESPOND MSG="MMU ERROR: Jam detected on T1 (slave 1, slot 1)"
-    Note over K: Printer paused, awaiting user intervention
-
-    Note over K: User clears jam, presses Resume
-    K->>E: MMU_HOME (re-initialise)
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    S-->>M: [EMPTY, LOADED, LOADED, EMPTY]
-    Note over E: Slot 1 LOADED again — ready to continue
-```
-
-### Scenario 5: Filament Runout
-
-**Design intent:** The slave spool sensor and the master splitter sensor are **NOT** runout detectors for the purpose of stopping a print. The sole authoritative runout sensor is the one located at the **printhead** (a Klipper-configured endstop/filament sensor). The slave and master sensors only reflect the presence of filament at their physical locations; their clearing does not pause or abort a print.
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S as Slave Box 0
-    participant K as Klipper Host
-    participant PH as Printhead Sensor
-
-    Note over S: Slot 1 in ASSIST state (printing T1)
-    Note over S: Spool runs out — slave sensor clears
-
-    Note over S: Sensor slot 1 opens
-    Note over S: Slot 1: ASSIST → EMPTY (on_retract_complete path skipped,<br/>sensor-clear-in-ASSIST branch fires)
-    Note over S: Motor 1: stop
-    Note over S: LED slot 1: off
-    Note over S: Remaining filament in bowden path continues feeding extruder
-
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    M->>S: GET_STATUS
-    S-->>M: [EMPTY, EMPTY, LOADED, EMPTY][sensors][errors]
-    Note over E: State stored silently — no action taken.<br/>Print continues while bowden buffer drains.
-
-    Note over PH: Filament runs out at printhead sensor
-    PH-->>K: RUNOUT event (Klipper filament_switch_sensor)
-    Note over K: Print paused / runout macro executed
-```
-
-**Responsibility table:**
-
-| Sensor | Location | Clears when… | Effect on print |
-|--------|----------|---------------|-----------------|
-| Slave slot sensor | Spool exit | Spool empty or filament pulled back | Motor stops, LED off — **print unaffected** |
-| Master splitter sensor | 4-to-1 splitter output | Filament leaves splitter | Klipper reads endstop state — **print unaffected** |
-| Printhead sensor | Hotend entry | No filament at nozzle | **Print pauses** (Klipper `filament_switch_sensor` runout macro) |
-
-### Scenario 6: Connection Loss (Watchdog)
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S as Slave Box 0
-    participant K as Klipper Host
-
-    Note over M: USB disconnected / Klipper restart
-    Note over S: Last GET_STATUS was 2 seconds ago...
-
-    loop Watchdog check (every 500 ms)
-        Note over S: elapsed = now - last_poll
-        Note over S: 2.5 s... 3 s... 3.5 s... 4 s... 4.5 s...
-    end
-
-    Note over S: elapsed > 5000 ms → WATCHDOG TRIGGERED!
-    Note over S: ⚠ All motors: STOP + DISABLE
-    Note over S: ⚠ All slots → ERROR
-    Note over S: ⚠ All LEDs → red blinking
-
-    Note over M: ...connection restored
-
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    M->>S: GET_STATUS
-    S-->>M: [ERROR, ERROR, ERROR, ERROR][...][...]
-    Note over S: Watchdog reset (connection restored)
-
-    E->>K: RESPOND MSG="MMU: Slave 1 watchdog recovery"
-    E->>M: rs485_send(addr=1, STOP_ALL)
-    Note over E: MMU_HOME required to recover
-```
-
-### Scenario 7: Set Filament Color
-
-```mermaid
-sequenceDiagram
-    participant U as User / Slicer
-    participant K as Klipper Host
-    participant E as Extras (pico_mmu.py)
-    participant SV as save_variables
-    participant M as Master MCU
-    participant S as Slave Box 0
-
-    U->>K: MMU_SET_FILAMENT_COLOR TOOL=1 COLOR=FF3300
-    K->>E: cmd_MMU_SET_FILAMENT_COLOR(tool=1, color="FF3300")
-
-    Note over E: Validate tool range and parse hex color
-    Note over E: _tool_colors[1] = (255, 51, 0)
-
-    E->>M: rs485_send(addr=1, SET_FILAMENT_COLOR, slot=1, r=255, g=51, b=0)
-    M->>S: SET_FILAMENT_COLOR(slot=1, r=255, g=51, b=0)
-    Note over S: _filament_colors[1] = (255, 51, 0)
-    alt Slot 1 is LOADED
-        Note over S: _update_slot_led(1) → LED solid (255, 51, 0) immediately
-    else Slot 1 is EMPTY / FEEDING / other
-        Note over S: Color stored #59; LED unchanged until slot returns to LOADED
-    end
-    S-->>M: [status: OK]
-    M-->>E: OK
-
-    E->>SV: save mmu_tool_colors[1] = [255, 51, 0]
-    Note over SV: Written to variables.cfg (survives restart)
-
-    E-->>K: "MMU: Tool T1 color set to #FF3300"
-    K-->>U: respond_info
-
-    Note over E,S: On next MMU_HOME — color is re-pushed after ASSIGN_ADDR
-```
-
-### Scenario 8: Filament Color After Power Cycle
-
-**Context:** A previous session set colors for some slots via `MMU_SET_FILAMENT_COLOR`. The printer was then powered off. On the next boot the user runs `MMU_HOME` — no `MMU_SET_FILAMENT_COLOR` commands are issued in this session.
-
-**Key design fact:** The slave does **not** persist `_filament_colors` to flash. On every boot it resets to the compiled-in default (solid green). The slave also does **not** report colors in `GET_STATUS` — only slot states, sensor bits, and error codes are returned. Klipper (`save_variables` → `variables.cfg`) is the sole persistent store for color assignments; the slave is always a downstream consumer.
-
-```mermaid
-sequenceDiagram
-    participant K as Klipper Host
-    participant E as Extras (pico_mmu.py)
-    participant SV as save_variables
-    participant M as Master MCU
-    participant S as Slave Box 0
-
-    Note over S: Power-on boot
-    Note over S: _filament_colors = [(0,255,0)] × 4  (default green, not read from flash)
-
-    K->>E: MMU_HOME
-    E->>M: broadcast DISCOVER
-    M->>S: DISCOVER
-    S-->>M: [unique_id]
-    M-->>E: unique_id
-
-    E->>M: ASSIGN_ADDR(unique_id, addr=1)
-    M->>S: ASSIGN_ADDR
-    S-->>M: [OK]
-
-    Note over E: Load persisted colors from save_variables
-    E->>SV: read mmu_tool_colors
-    SV-->>E: {0: [0,255,0], 1: [255,51,0], 3: [0,0,255]}
-    Note over E: Tool 2 has no entry → skip (slave keeps default green)
-
-    E->>M: SET_FILAMENT_COLOR(addr=1, slot=0, r=0, g=255, b=0)
-    M->>S: SET_FILAMENT_COLOR slot=0 (green)
-    S-->>M: OK
-
-    E->>M: SET_FILAMENT_COLOR(addr=1, slot=1, r=255, g=51, b=0)
-    M->>S: SET_FILAMENT_COLOR slot=1 (orange)
-    S-->>M: OK
-
-    E->>M: SET_FILAMENT_COLOR(addr=1, slot=3, r=0, g=0, b=255)
-    M->>S: SET_FILAMENT_COLOR slot=3 (blue)
-    S-->>M: OK
-
-    Note over S: slot 2 color = default green (never overridden this session)
-
-    E->>M: GET_STATUS(addr=1)
-    M->>S: GET_STATUS
-    S-->>M: [slot_states][sensors][errors]
-    Note over E: No color info in GET_STATUS — Klipper trusts its own save_variables
-
-    E-->>K: "MMU: Home complete. 1 slave online."
-```
-
-**Summary of responsibilities:**
-
-| Concern | Owner |
-|---|---|
-| Color persistence across power cycles | Klipper `save_variables` (`variables.cfg`) |
-| Color storage during a session | Slave RAM (`_filament_colors[]`) |
-| Color reporting to host | Not implemented — slave never pushes colors; host is the source of truth |
-| Re-synchronisation on boot | `MMU_HOME` → `ASSIGN_ADDR` phase pushes all saved colors back to the slave |
-| Slots with no saved color | Slave default green `(0, 255, 0)` is used; Klipper shows no color entry |
-
-### Scenario 9: Concurrent Slots — ASSIST Active While Another Slot Is Fed
-
-**Context:** Slot 0 is in ASSIST mode (the active tool is printing). The master simultaneously stages the next colour by feeding slot 1. Both motors run independently; each slot's state machine is fully isolated.
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S as Slave Box 0
-    participant Slot0 as Slot 0 (ASSIST)
-    participant Slot1 as Slot 1 (FEEDING)
-
-    Note over Slot0: ASSIST — motor running at low current
-
-    E->>M: rs485_send(addr=1, FEED, slot=1, speed=800)
-    M->>S: FEED(slot=1, speed=800 Hz)
-    Note over Slot1: FEED accepted — sensor triggered → OK
-    S-->>M: [status: OK]
-    M-->>E: OK
-
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    M->>S: GET_STATUS
-    S-->>M: [ASSIST, FEEDING, EMPTY, EMPTY][sensors][errors]
-    Note over E: Both slots active simultaneously ✓
-
-    Note over E: Master filament sensor triggered for slot 1
-    E->>M: rs485_send(addr=1, STOP, slot=1)
-    M->>S: STOP(slot=1)
-    S-->>M: [status: OK]
-    Note over Slot1: state → LOADED (sensor still triggered)
-
-    E->>M: rs485_query(addr=1, GET_STATUS)
-    M->>S: GET_STATUS
-    S-->>M: [ASSIST, LOADED, EMPTY, EMPTY][sensors][errors]
-    Note over Slot0: Slot 0 still ASSIST — completely unaffected ✓
-```
-
-**Key invariant:** Each slot has its own stepper, TMC2209, and state machine instance. Commands to different slots are fully independent; there is no shared lock between them.
-
-### Scenario 10: SET_FILAMENT_COLOR While a Slot Is in ASSIST
-
-**Context:** During active printing (slot in ASSIST), the user updates the filament color for the active slot and/or for an idle slot.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant E as Extras
-    participant M as Master MCU
-    participant S as Slave Box 0
-
-    Note over S: Slot 0 in ASSIST (motor running, LED = cyan)
-
-    rect rgb(255, 245, 220)
-        Note over U,S: Branch A — color change on the ASSIST slot itself
-        U->>E: MMU_SET_FILAMENT_COLOR TOOL=0 COLOR=C86400
-        E->>M: SET_FILAMENT_COLOR(addr=1, slot=0, r=200, g=100, b=0)
-        M->>S: SET_FILAMENT_COLOR slot=0
-        Note over S: _filament_colors[0] = (200, 100, 0) stored
-        Note over S: Slot is ASSIST → LED NOT updated yet (cyan stays)
-        S-->>M: [status: OK]
-        M-->>E: OK
-
-        Note over E: ...printing continues...
-
-        E->>M: rs485_send(addr=1, STOP, slot=0)
-        M->>S: STOP(slot=0)
-        Note over S: state → LOADED
-        Note over S: _update_slot_led(0) → SOLID (200, 100, 0)
-        S-->>M: [status: OK]
-        Note over S: LED now shows stored amber color ✓
-    end
-
-    rect rgb(220, 245, 220)
-        Note over U,S: Branch B — color change on a different (LOADED) slot
-        Note over S: Slot 2 is LOADED and idle
-        U->>E: MMU_SET_FILAMENT_COLOR TOOL=2 COLOR=0000FF
-        E->>M: SET_FILAMENT_COLOR(addr=1, slot=2, r=0, g=0, b=255)
-        M->>S: SET_FILAMENT_COLOR slot=2
-        Note over S: Slot 2 is LOADED → _update_slot_led(2) immediately
-        Note over S: LED slot 2: SOLID blue ✓
-        S-->>M: [status: OK]
-        Note over S: Slot 0 ASSIST LED completely unaffected ✓
-    end
-```
-
-**Key rules:**
-- `SET_FILAMENT_COLOR` always stores the color in `_filament_colors[slot]`.
-- `_update_slot_led` is only called if `slot.state == LOADED`; all other states (ASSIST, FEEDING, RETRACTING, ERROR, EMPTY) leave the LED unchanged.
-- The stored color is automatically applied on the next `LOADED` transition (e.g., after `STOP`).
-
-### Scenario 11: Hot-Plug — Second Slave Joins Active Bus
-
-**Context:** The system is running normally with Slave 1 assigned and being polled at 20 Hz. A second slave box is powered on mid-session and needs to join the bus without interrupting ongoing operations.
-
-```mermaid
-sequenceDiagram
-    participant E as Extras
-    participant M as Master MCU
-    participant S1 as Slave 1 (addr=0x01, active)
-    participant S2 as Slave 2 (addr=0xFF, just powered on)
-
-    Note over S1: ASSIST on slot 0, being polled normally
-    Note over S2: Boot — addr = 0xFF (unassigned)
-
-    loop Normal polling (continues throughout)
-        E->>M: rs485_query(addr=1, GET_STATUS)
-        M->>S1: GET_STATUS
-        S1-->>M: [ASSIST, LOADED, EMPTY, EMPTY][sensors][errors]
-        M-->>E: OK
-    end
-
-    Note over E: User triggers MMU_HOME (or extras detects new UID in DISCOVER sweep)
-
-    E->>M: rs485_send(addr=0xFF, DISCOVER)
-    M->>S1: DISCOVER
-    M->>S2: DISCOVER
-    Note over S1: addr=0x01 ≠ 0xFF → address filter drops frame, no response
-    Note over S2: addr=0xFF == own addr → random backoff, then respond
-    S2-->>M: [unique_id_2]
-    M-->>E: unique_id_2
-
-    Note over E: unique_id_2 matched to [pico_mmu_slave box_1] in printer.cfg
-
-    E->>M: rs485_send(addr=0xFF, ASSIGN_ADDR, uid_2 + 0x02)
-    M->>S2: ASSIGN_ADDR
-    S2-->>M: [status: OK]
-    Note over S2: addr saved to flash → addr = 0x02
-
-    E->>M: rs485_query(addr=2, GET_STATUS)
-    M->>S2: GET_STATUS
-    S2-->>M: [LOADED, EMPTY, EMPTY, EMPTY][sensors][errors]
-    M-->>E: slave 2 online ✓
-
-    Note over E: Both slaves now polled independently
-    Note over S1: Slot 0 still ASSIST — unaffected by discovery traffic ✓
-```
-
-**Key invariant:** An already-assigned slave ignores `DISCOVER` because its address filter rejects `addr=0xFF` frames (it only processes frames addressed to its own address, broadcast `0x00`, or `DISCOVER`/`ASSIGN_ADDR` when `addr == 0xFF`).
-
-### Scenario 12: Short Retracts During Active Print (ASSIST Unaffected)
+### Scenario 5: Short Retracts During Active Print (ASSIST Unaffected)
 
 **Context:** Print is in progress with slot 0 in ASSIST mode. The slicer emits small retraction moves between travel segments (typically 0.5–2 mm) to prevent oozing. These are extruder-only moves — the slave is never notified and stays in ASSIST throughout.
 
@@ -574,7 +281,46 @@ sequenceDiagram
 
 **Key invariant:** Short extruder retracts are purely Klipper extruder moves. The slave motor runs independently at constant low current in ASSIST; there is no RS485 command for a short retract. The slave is not aware of extruder position.
 
-### Scenario 13: RETRACT on an Idle Slot While Another Is in ASSIST
+### Scenario 6: Concurrent Slots — ASSIST Active While Another Slot Is Fed
+
+**Context:** Slot 0 is in ASSIST mode (the active tool is printing). The master simultaneously stages the next colour by feeding slot 1. Both motors run independently; each slot's state machine is fully isolated.
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant Slot0 as Slot 0 (ASSIST)
+    participant Slot1 as Slot 1 (FEEDING)
+
+    Note over Slot0: ASSIST — motor running at low current
+
+    E->>M: rs485_send(addr=1, FEED, slot=1, speed=800)
+    M->>S: FEED(slot=1, speed=800 Hz)
+    Note over Slot1: FEED accepted — sensor triggered → OK
+    S-->>M: [status: OK]
+    M-->>E: OK
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [ASSIST, FEEDING, EMPTY, EMPTY][sensors][errors]
+    Note over E: Both slots active simultaneously ✓
+
+    Note over E: Master filament sensor triggered for slot 1
+    E->>M: rs485_send(addr=1, STOP, slot=1)
+    M->>S: STOP(slot=1)
+    S-->>M: [status: OK]
+    Note over Slot1: state → LOADED (sensor still triggered)
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [ASSIST, LOADED, EMPTY, EMPTY][sensors][errors]
+    Note over Slot0: Slot 0 still ASSIST — completely unaffected ✓
+```
+
+**Key invariant:** Each slot has its own stepper, TMC2209, and state machine instance. Commands to different slots are fully independent; there is no shared lock between them.
+
+### Scenario 7: RETRACT on an Idle Slot While Another Is in ASSIST
 
 **Context:** Print is in progress (slot 1 in ASSIST). The operator or slicer triggers an unload of slot 2, which is currently LOADED (e.g. staging the next spool change or removing unused filament). Both operations run on the same slave concurrently.
 
@@ -616,7 +362,358 @@ sequenceDiagram
 
 **Key invariant:** `RETRACT` on a LOADED slot is accepted regardless of what other slots are doing. The `retract()` method only checks the state of its own slot (`Slot` instance). If the slot is in ASSIST, `retract()` stops the assist motor first and then starts reverse — but here slot 2 is LOADED (idle), so it proceeds directly to RETRACTING.
 
-### Scenario 15: Infinite Spool (Slot-Chain Auto-Switch)
+### Scenario 8: Set Filament Info
+
+```mermaid
+sequenceDiagram
+    participant U as User / Slicer
+    participant K as Klipper Host
+    participant E as Extras (pico_mmu.py)
+    participant SV as save_variables
+    participant M as Master MCU
+    participant S as Slave Box 0
+
+    U->>K: MMU_SET_FILAMENT TOOL=1 COLOR=FF3300 MATERIAL=PETG
+    K->>E: cmd_MMU_SET_FILAMENT(tool=1, color="FF3300", material="PETG")
+
+    Note over E: Validate tool range and parse hex color
+    Note over E: _tool_filaments[1] = (255, 51, 0, "PETG")
+
+    E->>M: rs485_send(addr=1, SET_FILAMENT, slot=1, r=255, g=51, b=0, material="PETG")
+    M->>S: SET_FILAMENT(slot=1, r=255, g=51, b=0, material=b"PETG")
+    Note over S: _filament_info[1] = (255, 51, 0, b"PETG")
+    alt Slot 1 is LOADED
+        Note over S: _update_slot_led(1) → LED solid (255, 51, 0) immediately
+    else Slot 1 is EMPTY / FEEDING / other
+        Note over S: Filament info stored #59; LED unchanged until slot returns to LOADED
+    end
+    S-->>M: [status: OK]
+    M-->>E: OK
+
+    E->>SV: save mmu_tool_filaments[1] = [255, 51, 0, "PETG"]
+    Note over SV: Written to variables.cfg (survives restart)
+
+    E-->>K: "MMU: Tool T1 set to #FF3300 material=PETG"
+    K-->>U: respond_info
+
+    Note over E,S: On next MMU_HOME — filament info is re-pushed after ASSIGN_ADDR
+```
+
+### Scenario 9: Filament Info After Power Cycle
+
+**Context:** A previous session set filament info for some slots via `MMU_SET_FILAMENT`. The printer was then powered off. On the next boot the user runs `MMU_HOME` — no `MMU_SET_FILAMENT` commands are issued in this session.
+
+**Key design fact:** The slave does **not** persist `_filament_info` to flash. On every boot it resets to the compiled-in default (solid green, unknown material). The slave also does **not** report filament info in `GET_STATUS` — only slot states, sensor bits, and error codes are returned. Klipper (`save_variables` → `variables.cfg`) is the sole persistent store for filament assignments; the slave is always a downstream consumer.
+
+```mermaid
+sequenceDiagram
+    participant K as Klipper Host
+    participant E as Extras (pico_mmu.py)
+    participant SV as save_variables
+    participant M as Master MCU
+    participant S as Slave Box 0
+
+    Note over S: Power-on boot
+    Note over S: _filament_info = [(0,255,0,b"")] × 4  (default green, unknown material)
+
+    K->>E: MMU_HOME
+    E->>M: broadcast DISCOVER
+    M->>S: DISCOVER
+    S-->>M: [unique_id]
+    M-->>E: unique_id
+
+    E->>M: ASSIGN_ADDR(unique_id, addr=1)
+    M->>S: ASSIGN_ADDR
+    S-->>M: [OK]
+
+    Note over E: Load persisted filament info from save_variables
+    E->>SV: read mmu_tool_filaments
+    SV-->>E: {0: [0,255,0,""], 1: [255,51,0,"PETG"], 3: [0,0,255,""]}
+    Note over E: Tool 2 has no entry → skip (slave keeps default green)
+
+    E->>M: SET_FILAMENT(addr=1, slot=0, r=0, g=255, b=0, material="")
+    M->>S: SET_FILAMENT slot=0 (green)
+    S-->>M: OK
+
+    E->>M: SET_FILAMENT(addr=1, slot=1, r=255, g=51, b=0, material="PETG")
+    M->>S: SET_FILAMENT slot=1 (orange, PETG)
+    S-->>M: OK
+
+    E->>M: SET_FILAMENT(addr=1, slot=3, r=0, g=0, b=255, material="")
+    M->>S: SET_FILAMENT slot=3 (blue)
+    S-->>M: OK
+
+    Note over S: slot 2 filament = default green (never overridden this session)
+
+    E->>M: GET_STATUS(addr=1)
+    M->>S: GET_STATUS
+    S-->>M: [slot_states][sensors][errors]
+    Note over E: No filament info in GET_STATUS — Klipper trusts its own save_variables
+
+    E-->>K: "MMU: Home complete. 1 slave online."
+```
+
+**Summary of responsibilities:**
+
+| Concern | Owner |
+|---|---|
+| Filament info persistence across power cycles | Klipper `save_variables` (`variables.cfg`) |
+| Filament info storage during a session | Slave RAM (`_filament_info[]`) |
+| Filament info reporting to host | Not implemented — slave never pushes filament info; host is the source of truth |
+| Re-synchronisation on boot | `MMU_HOME` → `ASSIGN_ADDR` phase pushes all saved colors back to the slave |
+| Slots with no saved color | Slave default green `(0, 255, 0)` is used; Klipper shows no color entry |
+
+### Scenario 10: SET_FILAMENT While a Slot Is in ASSIST (branch A/B)
+
+**Context:** During active printing (slot in ASSIST), the user updates the filament info for the active slot and/or for an idle slot.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant E as Extras
+    participant M as Master MCU
+    participant S as Slave Box 0
+
+    Note over S: Slot 0 in ASSIST (motor running, LED = cyan)
+
+    rect rgb(255, 245, 220)
+        Note over U,S: Branch A — filament update on the ASSIST slot itself
+        U->>E: MMU_SET_FILAMENT TOOL=0 COLOR=C86400 MATERIAL=ABS
+        E->>M: SET_FILAMENT(addr=1, slot=0, r=200, g=100, b=0, material="ABS")
+        M->>S: SET_FILAMENT slot=0
+        Note over S: _filament_info[0] = (200, 100, 0, b"ABS") stored
+        Note over S: Slot is ASSIST → LED NOT updated yet (cyan stays)
+        S-->>M: [status: OK]
+        M-->>E: OK
+
+        Note over E: ...printing continues...
+
+        E->>M: rs485_send(addr=1, STOP, slot=0)
+        M->>S: STOP(slot=0)
+        Note over S: state → LOADED
+        Note over S: _update_slot_led(0) → SOLID (200, 100, 0)
+        S-->>M: [status: OK]
+        Note over S: LED now shows stored amber color ✓
+    end
+
+    rect rgb(220, 245, 220)
+        Note over U,S: Branch B — filament update on a different (LOADED) slot
+        Note over S: Slot 2 is LOADED and idle
+        U->>E: MMU_SET_FILAMENT TOOL=2 COLOR=0000FF MATERIAL=PETG
+        E->>M: SET_FILAMENT(addr=1, slot=2, r=0, g=0, b=255, material="PETG")
+        M->>S: SET_FILAMENT slot=2
+        Note over S: Slot 2 is LOADED → _update_slot_led(2) immediately
+        Note over S: LED slot 2: SOLID blue ✓
+        S-->>M: [status: OK]
+        Note over S: Slot 0 ASSIST LED completely unaffected ✓
+    end
+```
+
+**Key rules:**
+- `SET_FILAMENT` always stores the filament info in `_filament_info[slot]`.
+- `_update_slot_led` is only called if `slot.state == LOADED`; all other states (ASSIST, FEEDING, RETRACTING, ERROR, EMPTY) leave the LED unchanged.
+- The stored color is automatically applied on the next `LOADED` transition (e.g., after `STOP`).
+- Material is stored on the slave for LED identity purposes; infinite-spool auto-grouping on the Klipper side uses `(color, material)` as the group key.
+
+### Scenario 11: Filament Info Preserved After Runout
+
+**Context:** A slot is in ASSIST (printing in progress). The spool runs out — the slave sensor clears and the slot transitions `ASSIST → EMPTY` autonomously. The slave must **not** wipe `_filament_info` on this transition. The master does not need to re-send `SET_FILAMENT` for a same-spool reload; if a new spool is inserted the LED immediately shows the stored color.
+
+```mermaid
+sequenceDiagram
+    participant E as Extras (pico_mmu.py)
+    participant M as Master MCU
+    participant S as Slave Box 0
+
+    Note over S: Slot 0 in ASSIST, _filament_info[0] = (220, 30, 30, b"PLA")
+    Note over S: Spool runs out — slave sensor clears
+
+    Note over S: sensor_loop detects clear during ASSIST
+    Note over S: slot.stop() → Slot 0: ASSIST → EMPTY
+    Note over S: _filament_info[0] unchanged — NOT cleared
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [EMPTY, -, -, -][sensors][errors]
+    M-->>E: slot 0 = EMPTY
+
+    Note over E: _handle_runout() fires (no infinite-spool backup)
+    Note over E: Print paused / user loads new spool
+
+    Note over S: New spool inserted — sensor triggers → Slot 0: EMPTY → LOADED
+    Note over S: _update_slot_led(0) → SOLID (220, 30, 30) ← stored color reapplied
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [LOADED, -, -, -]
+    M-->>E: slot 0 = LOADED ✓
+    Note over E: No SET_FILAMENT needed — slave already has the right color
+```
+
+**Key rules:**
+- `_filament_info[slot]` is only written by `SET_FILAMENT` commands from the master. The slave never clears or modifies it autonomously.
+- On `EMPTY → LOADED` transition (`update_from_sensor`), `_update_slot_led` uses the stored RGB automatically.
+- The master must re-send `SET_FILAMENT` only when the material genuinely changes (spool swap), not on a same-material reload.
+
+### Scenario 12: New Filament Info Applied After Planned Spool Swap
+
+**Context:** The master deliberately retracts a slot (spool change), then pushes new `SET_FILAMENT` for the replacement material **before** the new spool is inserted. When the new spool triggers the sensor (EMPTY → LOADED), the LED and stored info immediately reflect the new material.
+
+```mermaid
+sequenceDiagram
+    participant U as User / Slicer
+    participant E as Extras (pico_mmu.py)
+    participant M as Master MCU
+    participant S as Slave Box 0
+
+    Note over S: Slot 1 LOADED, _filament_info[1] = (0, 80, 220, b"PETG")
+
+    U->>E: Spool change — retract slot 1
+    E->>M: rs485_send(addr=1, RETRACT, slot=1, speed=1000)
+    M->>S: RETRACT(slot=1)
+    Note over S: Slot 1 → RETRACTING
+    S-->>M: OK
+
+    Note over S: Sensor clears → Slot 1: RETRACTING → EMPTY
+    Note over S: _filament_info[1] = (0, 80, 220, b"PETG") still stored
+
+    Note over U: User swaps spool for green ABS
+    U->>E: MMU_SET_FILAMENT TOOL=1 COLOR=14B43C MATERIAL=ABS
+    E->>M: SET_FILAMENT(addr=1, slot=1, r=20, g=180, b=60, material="ABS")
+    M->>S: SET_FILAMENT slot=1
+    Note over S: _filament_info[1] = (20, 180, 60, b"ABS") ← old PETG replaced
+    Note over S: Slot is EMPTY → LED not updated yet
+    S-->>M: OK
+
+    Note over S: User inserts new ABS spool → sensor triggers → LOADED
+    Note over S: _update_slot_led(1) → SOLID (20, 180, 60) ← new ABS color
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    S-->>M: [-, LOADED, -, -]
+    M-->>E: slot 1 = LOADED with green ABS ✓
+```
+
+**Key rules:**
+- `SET_FILAMENT` is accepted regardless of slot state (EMPTY, LOADED, RETRACTING, etc.).
+- `_update_slot_led` is only called when the slot is LOADED; storing new info on an EMPTY slot is valid and the LED updates on the next LOADED transition.
+- The "spool swap window" — the period between RETRACT completing and the new spool being inserted — is when the master should issue `SET_FILAMENT` to update the color/material.
+
+### Scenario 13: Jam Detection
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant TMC as TMC2209 (slot 1)
+    participant K as Klipper Host
+
+    Note over S: Slot 1 in FEEDING state
+    Note over S: StallGuard polled every 200 ms
+
+    S->>TMC: read SG_RESULT
+    TMC-->>S: SG_RESULT = 8 (threshold = 20)
+    Note over S: SG_RESULT < THRESHOLD → JAM!
+    Note over S: Motor 1: STOP
+    Note over S: Slot 1: state = ERROR(JAM)
+    Note over S: LED slot 1: red blinking
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [EMPTY, ERROR, LOADED, EMPTY][0x04][0x03]
+    M-->>E: slot 1 = ERROR, error_code = JAM
+
+    Note over E: JAM error detected!
+    E->>M: rs485_send(addr=1, STOP_ALL)
+    M->>S: STOP_ALL
+    S-->>M: OK
+    Note over S: All motors stopped
+
+    E->>K: PAUSE (pause print)
+    E->>K: RESPOND MSG="MMU ERROR: Jam detected on T1 (slave 1, slot 1)"
+    Note over K: Printer paused, awaiting user intervention
+
+    Note over K: User clears jam, presses Resume
+    K->>E: MMU_HOME (re-initialise)
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    S-->>M: [EMPTY, LOADED, LOADED, EMPTY]
+    Note over E: Slot 1 LOADED again — ready to continue
+```
+
+### Scenario 14: Filament Runout
+
+**Design intent:** The slave spool sensor and the master splitter sensor are **NOT** runout detectors for the purpose of stopping a print. The sole authoritative runout sensor is the one located at the **printhead** (a Klipper-configured endstop/filament sensor). The slave and master sensors only reflect the presence of filament at their physical locations; their clearing does not pause or abort a print.
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant K as Klipper Host
+    participant PH as Printhead Sensor
+
+    Note over S: Slot 1 in ASSIST state (printing T1)
+    Note over S: Spool runs out — slave sensor clears
+
+    Note over S: Sensor slot 1 opens
+    Note over S: Slot 1: ASSIST → EMPTY (on_retract_complete path skipped,<br/>sensor-clear-in-ASSIST branch fires)
+    Note over S: Motor 1: stop
+    Note over S: LED slot 1: off
+    Note over S: Remaining filament in bowden path continues feeding extruder
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [EMPTY, EMPTY, LOADED, EMPTY][sensors][errors]
+    Note over E: State stored silently — no action taken.<br/>Print continues while bowden buffer drains.
+
+    Note over PH: Filament runs out at printhead sensor
+    PH-->>K: RUNOUT event (Klipper filament_switch_sensor)
+    Note over K: Print paused / runout macro executed
+```
+
+**Responsibility table:**
+
+| Sensor | Location | Clears when… | Effect on print |
+|--------|----------|---------------|-----------------|
+| Slave slot sensor | Spool exit | Spool empty or filament pulled back | Motor stops, LED off — **print unaffected** |
+| Master splitter sensor | 4-to-1 splitter output | Filament leaves splitter | Klipper reads endstop state — **print unaffected** |
+| Printhead sensor | Hotend entry | No filament at nozzle | **Print pauses** (Klipper `filament_switch_sensor` runout macro) |
+
+### Scenario 15: Connection Loss (Watchdog)
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant K as Klipper Host
+
+    Note over M: USB disconnected / Klipper restart
+    Note over S: Last GET_STATUS was 2 seconds ago...
+
+    loop Watchdog check (every 500 ms)
+        Note over S: elapsed = now - last_poll
+        Note over S: 2.5 s... 3 s... 3.5 s... 4 s... 4.5 s...
+    end
+
+    Note over S: elapsed > 5000 ms → WATCHDOG TRIGGERED!
+    Note over S: ⚠ All motors: STOP + DISABLE
+    Note over S: ⚠ All slots → ERROR
+    Note over S: ⚠ All LEDs → red blinking
+
+    Note over M: ...connection restored
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [ERROR, ERROR, ERROR, ERROR][...][...]
+    Note over S: Watchdog reset (connection restored)
+
+    E->>K: RESPOND MSG="MMU: Slave 1 watchdog recovery"
+    E->>M: rs485_send(addr=1, STOP_ALL)
+    Note over E: MMU_HOME required to recover
+```
+
+### Scenario 16: Infinite Spool (Slot-Chain Auto-Switch)
 
 **Context:** Two or more slots hold the same color/material and are configured as a group.
 While printing from slot 0 (ASSIST), the spool runs out — the slave sensor clears and the
@@ -742,9 +839,107 @@ sequenceDiagram
 - If the switch itself fails (`PicoMmuError`), an emergency stop is issued and the print
   remains paused.
 
+### Scenario 17: Spool Exhaustion Without Infinite Spool (Bowden Drain + Printhead Sensor)
+
+**Context:** Slot 0 is in ASSIST mode (actively printing). The spool runs out — the slave
+sensor clears and the slot transitions `ASSIST → EMPTY`. However, infinite spool is **not**
+configured (the tool has no group or no loaded backup). The remaining filament in the
+bowden tube continues to be consumed by the extruder until the printhead sensor triggers.
+
+**Key timing:** Between the slave sensor clearing and the printhead sensor firing, there is
+a "bowden drain" period (seconds to tens of seconds depending on tube length and print speed).
+During this window the extruder is pulling filament with no motor assistance from the slave.
+
+```mermaid
+sequenceDiagram
+    participant E as Extras (pico_mmu.py)
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant K as Klipper Host
+    participant PH as Printhead Sensor
+
+    Note over S: Slot 0 in ASSIST (motor running, spool nearly empty)
+    Note over S: Last bit of filament passes slave sensor
+
+    Note over S: Sensor slot 0 opens
+    Note over S: Slot 0: ASSIST → EMPTY
+    Note over S: Motor 0: STOP (nothing left to push)
+    Note over S: LED slot 0: off
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [EMPTY, LOADED, EMPTY, EMPTY][sensors][errors]
+    M-->>E: slot 0 = EMPTY (was ASSIST last poll)
+
+    Note over E: ASSIST→EMPTY on current_tool detected
+    Note over E: _handle_runout() scheduled
+    Note over E: _find_backup_tool(T0) → no group / no LOADED backup → None
+
+    E-->>K: "MMU: T0 exhausted — no loaded backup in group. Pausing print."
+    Note over E: state = ERROR
+    E->>K: PAUSE
+    Note over K: Print paused — extruder stops
+
+    Note over K: Filament tail still in bowden + hotend
+    Note over K: Extruder stopped → filament stationary in tube
+
+    rect rgb(255, 245, 230)
+        Note over K,PH: User intervention required
+        Note over K: User loads new spool into slot 0 (or another slot)
+        Note over K: User runs MMU_HOME or MMU_LOAD TOOL=N
+        Note over E: New tool loaded → state = PRINTING
+        Note over K: User runs RESUME
+        Note over K: Print continues
+    end
+```
+
+**Race condition — printhead sensor fires before extras reacts:**
+
+```mermaid
+sequenceDiagram
+    participant E as Extras
+    participant K as Klipper Host
+    participant PH as Printhead Sensor
+
+    Note over E: Slave sensor clears (ASSIST→EMPTY)
+    Note over E: Next poll in ~50 ms...
+
+    Note over PH: Bowden very short — filament drains fast
+    PH-->>K: RUNOUT event (filament_switch_sensor)
+    Note over K: Klipper native runout macro fires → PAUSE
+
+    Note over E: Poll arrives, detects ASSIST→EMPTY
+    Note over E: _handle_runout() → state already paused
+    Note over E: state = ERROR (idempotent with existing PAUSE)
+
+    Note over K: Both handlers agree: print is paused
+    Note over K: No conflict — PAUSE is idempotent in Klipper
+```
+
+**Interaction between extras runout and Klipper's `filament_switch_sensor`:**
+
+| Event | Fires when… | Action | Priority |
+|---|---|---|---|
+| Extras `_handle_runout` | `GET_STATUS` poll detects ASSIST→EMPTY (~50 ms latency) | PAUSE + set STATE_ERROR | First responder (proactive) |
+| Klipper `filament_switch_sensor` | Printhead sensor clears (after bowden drains) | PAUSE via runout macro | Backup safety net |
+| Both fire | Short bowden or slow poll | Both call PAUSE — idempotent, no conflict | — |
+
+**Key invariants:**
+- The extras module reacts at the **slave sensor** (proactive) — it does not wait for the
+  printhead sensor. This gives the user earlier warning and prevents printing into air.
+- Klipper's native `filament_switch_sensor` remains active as a **safety net** — even if
+  the extras module fails to react, the print will still pause when filament runs out at
+  the nozzle.
+- During the bowden drain period (if print is NOT paused), the extruder operates without
+  ASSIST. For short bowden paths this is negligible; for very long paths (>1 m) the
+  extruder may struggle with friction. This is acceptable because the pause fires within
+  one poll cycle (~50 ms) of the slave sensor clearing.
+- The `_handle_runout` callback and Klipper's runout macro are both idempotent with
+  respect to PAUSE — calling PAUSE twice does not error or unpause.
+
 ---
 
-### Scenario 14: System Block Diagram
+### Scenario 18: System Block Diagram
 
 ```mermaid
 flowchart TB
@@ -842,20 +1037,19 @@ flowchart TB
 
 | CMD | Name | Request DATA | Response DATA | Description |
 |---|---|---|---|---|
-| `0x01` | PING | — | `[fw_ver:2]` | Presence check, returns firmware version |
-| `0x02` | DISCOVER | — | `[unique_id:8]` | Find unassigned slaves (addr=0xFF) |
-| `0x03` | ASSIGN_ADDR | `[unique_id:8][new_addr:1]` | `[status:1]` | Assign address to slave |
-| `0x04` | GET_STATUS | — | `[slot_states:4][sensors:1][errors:1]` | State of all 4 slots |
-| `0x05` | FEED | `[slot:1][speed_hz:2]` | `[status:1]` | Start feeding from slot |
-| `0x06` | RETRACT | `[slot:1][speed_hz:2]` | `[status:1]` | Retract filament in slot |
-| `0x07` | SET_ASSIST | `[slot:1][current_ma:2]` | `[status:1]` | Enable Assist Mode |
-| `0x08` | STOP | `[slot:1]` | `[status:1]` | Stop one slot motor |
-| `0x09` | STOP_ALL | — | `[status:1]` | Emergency stop all motors |
-| `0x0A` | SET_LED | `[mode:1][slot:1][r:1][g:1][b:1]` | `[status:1]` | Control WS2812B LEDs |
-| `0x0B` | GET_CONFIG | — | `[config_blob:N]` | Read slave configuration |
-| `0x0C` | SET_CURRENT | `[slot:1][run_ma:2][hold_ma:2]` | `[status:1]` | Configure TMC2209 current |
-| `0x0D` | HOME_SLOT | `[slot:1]` | `[status:1]` | Feed until sensor triggers |
-| `0x0E` | SET_FILAMENT_COLOR | `[slot:1][r:1][g:1][b:1]` | `[status:1]` | Set filament color for a slot; updates LED immediately if slot is LOADED |
+| `0x01` | DISCOVER | — | `[unique_id:8]` | Find unassigned slaves (addr=0xFF) |
+| `0x02` | ASSIGN_ADDR | `[unique_id:8][new_addr:1]` | `[status:1]` | Assign address to slave |
+| `0x03` | PING | — | `[fw_ver:2]` | Presence check, returns firmware version |
+| `0x04` | GET_CONFIG | — | `[config_blob:N]` | Read slave configuration |
+| `0x05` | GET_STATUS | — | `[slot_states:4][sensors:1][errors:1]` | State of all 4 slots |
+| `0x06` | SET_FILAMENT | `[slot:1][r:1][g:1][b:1][material:4]` | `[status:1]` | Set per-slot filament color and material; material is 4-byte NUL-padded ASCII (e.g. `PLA\0`, `PETG`); updates LED immediately if slot is LOADED |
+| `0x07` | SET_CURRENT | `[slot:1][run_ma:2][hold_ma:2]` | `[status:1]` | Configure TMC2209 current |
+| `0x08` | HOME_SLOT | `[slot:1]` | `[status:1]` | Feed until sensor triggers |
+| `0x09` | FEED | `[slot:1][speed_hz:2]` | `[status:1]` | Start feeding from slot |
+| `0x0A` | SET_ASSIST | `[slot:1][current_ma:2]` | `[status:1]` | Enable Assist Mode |
+| `0x0B` | RETRACT | `[slot:1][speed_hz:2]` | `[status:1]` | Retract filament in slot |
+| `0x0C` | STOP | `[slot:1]` | `[status:1]` | Stop one slot motor |
+| `0x0D` | STOP_ALL | — | `[status:1]` | Emergency stop all motors |
 
 **Status codes (`status` field in responses):**
 
@@ -1146,15 +1340,17 @@ gcode: MMU_CHANGE_TOOL TOOL=1
 | RS485 loopback | Hardware (2× Pico 2) | All commands (0x01–0x0D) received without errors, latency < 10 ms |
 | Auto-enumeration | Hardware (3 slaves) | All slaves discovered and assigned an address in 1 MMU_HOME cycle |
 | Full tool change T0→T1 | Integration (Klipper) | Change completes in < 10 s, no errors, assist mode active |
-| Concurrent slots (ASSIST + FEED) | Integration (in-process) | Both slot states coexist in GET_STATUS; STOP on one slot does not affect the other |
-| Concurrent slots (ASSIST + RETRACT on idle slot) | Integration (in-process) | RETRACT completes on idle slot; ASSIST slot state unchanged throughout |
-| Short retracts during ASSIST | Design invariant | No RS485 command sent to slave for extruder-only retracts; GET_STATUS shows ASSIST throughout |
-| SET_FILAMENT_COLOR during ASSIST | Integration (in-process) | Color stored but LED unchanged; applied on STOP → LOADED |
-| SET_FILAMENT_COLOR on idle slot during ASSIST | Integration (in-process) | Idle slot LED updated immediately; ASSIST slot LED unaffected |
-| Hot-plug (slave joins active bus) | Integration (in-process) | Assigned slave ignores DISCOVER; new slave is enumerated and polled without disrupting the first |
+| Concurrent slots (ASSIST + FEED) | Integration (in-process, Scenario 6) | Both slot states coexist in GET_STATUS; STOP on one slot does not affect the other |
+| Concurrent slots (ASSIST + RETRACT on idle slot) | Integration (in-process, Scenario 7) | RETRACT completes on idle slot; ASSIST slot state unchanged throughout |
+| Short retracts during ASSIST | Design invariant (Scenario 5) | No RS485 command sent to slave for extruder-only retracts; GET_STATUS shows ASSIST throughout |
+| SET_FILAMENT during ASSIST | Integration (in-process, Scenario 10) | Color stored but LED unchanged; applied on STOP → LOADED |
+| SET_FILAMENT on idle slot during ASSIST | Integration (in-process, Scenario 10b) | Idle slot LED updated immediately; ASSIST slot LED unaffected |
+| Filament info preserved after runout | Integration (in-process, Scenario 11) | _filament_info not cleared by ASSIST→EMPTY; reapplied on next LOADED |
+| Filament info updated after spool swap | Integration (in-process, Scenario 12) | SET_FILAMENT accepted while EMPTY; new color applied on LOADED |
+| Hot-plug (slave joins active bus) | Integration (in-process, Scenario 2) | Assigned slave ignores DISCOVER; new slave is enumerated and polled without disrupting the first |
 | Stress polling | Hardware (8 slaves, 1 hour) | Packet loss < 0.1%, no hangs |
 | Infinite spool — group resolution | Unit (`test_pico_mmu_infinite_spool.py`) | Explicit groups, auto-color, override, backup find, runout dispatch all verified |
-| Infinite spool — slave switch sequence | Integration (in-process, Scenario 15) | Slave accepts FEED+STOP+ASSIST on backup slot; exhausted slot stays EMPTY |
+| Infinite spool — slave switch sequence | Integration (in-process, Scenario 16) | Slave accepts FEED+STOP+ASSIST on backup slot; exhausted slot stays EMPTY |
 
 ---
 
@@ -1172,10 +1368,73 @@ gcode: MMU_CHANGE_TOOL TOOL=1
 
 ---
 
-## 8. Out of Scope (Future Phases)
+## 8. Missing Features vs. Production Systems (AMS / MMU3 / CFS / ERCF)
 
-- OTA firmware updates to slaves over RS485
-- Web UI / Mainsail integration
-- Moonraker plugin
-- Nema 17 support with different currents (config already accommodates this)
-- Colour-coded spool presets (LED preset by filament type)
+Gap analysis comparing Osamu against Bambu AMS, Prusa MMU3, Creality CFS, and community projects (ERCF/Tradrack).
+
+### 8.1 Reliability & Error Recovery
+
+| Feature | Production reference | Osamu status |
+|---|---|---|
+| Automatic retry on failed load/unload | AMS retries 2–3× with varying speed/pressure; MMU3 similar | Not implemented — single attempt, then `PicoMmuError` |
+| Filament cutter | MMU3 blade; AMS integrated cutter; CFS ships with spare cutter | No cutter — relies solely on G-code tip-forming |
+| Configurable tip-forming profiles | AMS/MMU3 expose per-material tunable parameters (cooling moves, ramming) | Hardcoded G-code sequence (`E-5`/`E2`/`E-15`) — no user profile |
+| Bowden length calibration | AMS measures bowden length during homing; MMU3 has calibrated load distances | Not implemented — relies on master sensor trigger timing only |
+| Filament motion sensor / encoder | MMU3 encoder wheel; AMS tracks extrusion via motor current | Binary present/absent switches only — no motion sensing |
+| Stuck-filament detection during unload | MMU3 encoder; AMS motor current | Only StallGuard during motor-on phases; no detection if stuck in hotend during tip-forming |
+
+### 8.2 User Experience & UI
+
+| Feature | Production reference | Osamu status |
+|---|---|---|
+| Web UI / slicer integration | AMS → Bambu Studio; MMU3 → PrusaSlicer; CFS → Creality Print | Not implemented — no Mainsail / Fluidd / Moonraker plugin |
+| Material / spool database | AMS RFID tags (material, temp, weight); CFS RFID auto-identification & filament mapping | Color only — no material type, temperature profiles, or remaining weight |
+| RFID / NFC spool identification | AMS reads Bambu RFID spools; CFS reads Creality Hyper RFID spools | No RFID / NFC — manual color assignment only |
+| Per-material purge volumes | Slicer-integrated purge tower volumes based on material transition | No material metadata communicated to slicer |
+| Remaining filament estimation | AMS tracks consumed weight via motor rotation | Binary present/gone — no usage tracking |
+| Interactive error recovery | AMS/CFS guided step-by-step dialogs on touchscreen; MMU3 LCD prompts | Console text only (`RESPOND MSG=...`) |
+
+### 8.3 Environmental & Storage
+
+| Feature | Production reference | Osamu status |
+|---|---|---|
+| Moisture-proof / drybox storage | AMS sealed chamber with desiccant; CFS moisture-proof storage built-in | No enclosure or humidity management — open spool holder |
+| Humidity sensor | AMS humidity sensor + indicator | No environmental sensors |
+| Active filament drying | CFS/AMS companion dryer accessories; SpacePi X4 integrated drying | Not planned |
+
+### 8.4 Operational Features
+
+| Feature | Production reference | Osamu status |
+|---|---|---|
+| Filament buffer / rewinder | AMS Lite rewinder; CFS includes filament buffer; ERCF encoder + servo | No buffer management — ASSIST mode (constant low-current push) only |
+| Pre-loading / staging next tool | AMS pre-stages next color during print to reduce swap time | Concurrent FEED designed (Scenario 9) but no slicer-triggered pre-staging logic in extras |
+| Acceleration ramp during load/unload | AMS ramps speed to reduce jams | Constant speed only — no acceleration / deceleration ramp |
+| Configurable speed per material | Different feed/retract speeds for PLA vs. TPU vs. PETG | Single global speed — no per-material or per-slot speed config |
+| Snap-away / soluble support coordination | CFS supports snap-away support material via filament mapping | No support-material awareness |
+| Idle / power management | Motors disabled after inactivity; CFS sleep mode | Watchdog kills motors on timeout, but no graceful idle mode during long non-MMU segments |
+| OTA firmware update | AMS via Bambu Studio; MMU3 via PrusaSlicer; CFS via Creality Print | Not implemented |
+| Statistics / logging | Tool change count, success rate, average swap time | Not implemented |
+| Nema 17 motor support | Various community projects | Config structure accommodates it, but untested |
+
+### 8.5 Safety & Edge Cases
+
+| Feature | Production reference | Osamu status |
+|---|---|---|
+| Hotend temperature check before load | AMS/MMU3 won't load into cold hotend | No temp check — cold hotend jam risk |
+| Per-slave failure isolation | CFS continues with remaining slots if one unit jams | `_emergency_stop()` halts ALL slaves on any error — no per-slave isolation |
+| Power-loss recovery | AMS/CFS resume with known filament state | No persistence — `MMU_HOME` required after every restart |
+| Bus error counters / diagnostics | Internal retransmission + telemetry in AMS/CFS | No error counters exposed to user |
+| Filament diameter / tangle detection | Some community projects | Not planned |
+
+### 8.6 Priority Order (highest impact first)
+
+1. **No automatic retry** — single biggest reliability gap vs. all production systems
+2. **Hardcoded tip-forming** — must be configurable per material
+3. **No hotend temp check** before load — safety issue
+4. **No UI / Moonraker integration** — usability blocker
+5. **No bowden length calibration** — affects load detection reliability
+6. **Emergency stop is all-or-nothing** — should isolate per-slave failures
+7. **No filament motion sensing** — can't detect grinding or partial clogs
+8. **No spool / material metadata** — color only; no purge volume, temp, or RFID
+9. **No filament buffer** — ASSIST mode alone may not compensate for long bowden paths
+10. **No OTA firmware update** — maintenance burden as fleet grows

@@ -25,20 +25,19 @@
 #define PMU_CMD_DIR_RESPONSE 0x80
 
 // Command codes
-#define PMU_CMD_PING         0x01
-#define PMU_CMD_DISCOVER     0x02
-#define PMU_CMD_ASSIGN_ADDR  0x03
-#define PMU_CMD_GET_STATUS   0x04
-#define PMU_CMD_FEED         0x05
-#define PMU_CMD_RETRACT      0x06
-#define PMU_CMD_SET_ASSIST   0x07
-#define PMU_CMD_STOP         0x08
-#define PMU_CMD_STOP_ALL     0x09
-#define PMU_CMD_SET_LED              0x0A
-#define PMU_CMD_GET_CONFIG           0x0B
-#define PMU_CMD_SET_CURRENT          0x0C
-#define PMU_CMD_HOME_SLOT            0x0D
-#define PMU_CMD_SET_FILAMENT_COLOR   0x0E
+#define PMU_CMD_DISCOVER             0x01
+#define PMU_CMD_ASSIGN_ADDR          0x02
+#define PMU_CMD_PING                 0x03
+#define PMU_CMD_GET_CONFIG           0x04
+#define PMU_CMD_GET_STATUS           0x05
+#define PMU_CMD_SET_FILAMENT          0x06
+#define PMU_CMD_SET_CURRENT          0x07
+#define PMU_CMD_HOME_SLOT            0x08
+#define PMU_CMD_FEED                 0x09
+#define PMU_CMD_SET_ASSIST           0x0A
+#define PMU_CMD_RETRACT              0x0B
+#define PMU_CMD_STOP                 0x0C
+#define PMU_CMD_STOP_ALL             0x0D
 
 // Status codes
 #define PMU_STATUS_OK              0x00

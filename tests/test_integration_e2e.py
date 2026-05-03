@@ -99,21 +99,21 @@ def test_e2e_stop_returns_to_loaded(bus):
     assert resp[1] == SlotState.LOADED
 
 
-def test_e2e_set_filament_color(bus):
-    """SET_FILAMENT_COLOR → verify stored color and immediate LED update."""
+def test_e2e_set_filament(bus):
+    """SET_FILAMENT → verify stored filament info and immediate LED update."""
     master, slave = bus
     # Put slot 2 in LOADED state
     slave.inject_filament(2, True)
     time.sleep(0.05)
 
-    # Set color to orange
-    color_data = bytes([2, 255, 128, 0])
-    resp = master.query(slave.addr, Cmd.SET_FILAMENT_COLOR, color_data)
-    assert resp is not None, "SET_FILAMENT_COLOR timed out"
+    # Set color to orange, material PLA
+    color_data = bytes([2, 255, 128, 0]) + b"PLA\x00"
+    resp = master.query(slave.addr, Cmd.SET_FILAMENT, color_data)
+    assert resp is not None, "SET_FILAMENT timed out"
     assert resp[0] == Status.OK
 
-    # Verify color stored and LED updated
-    assert slave.ctrl._filament_colors[2] == (255, 128, 0)
+    # Verify filament info stored and LED updated
+    assert slave.ctrl._filament_info[2] == (255, 128, 0, b"PLA")
     assert slave.ctrl._leds._modes[2] == LedMode.SOLID
     assert slave.ctrl._leds._colors[2][:3] == (255, 128, 0)
 
