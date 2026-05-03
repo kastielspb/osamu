@@ -96,7 +96,7 @@ class PicoMmuSlave:
                 raise config.error("pico_mmu_slave: invalid hex color '%s'" % cs)
         self.addr = 0  # Assigned during enumeration
         self.online = False
-        self.slot_states = [SlotState.EMPTY] * 4
+        self.slot_states = [SlotState.EMPTY] * len(self.slots)
         self.fw_version = (0, 0)
 
 

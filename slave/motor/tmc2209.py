@@ -185,7 +185,7 @@ class TMC2209:
 
 
 class TMC2209Bank:
-    """Manages all 4 TMC2209 drivers on a shared UART bus."""
+    """Manages all TMC2209 drivers on a shared UART bus."""
 
     def __init__(self):
         self._uart = UART(
@@ -204,14 +204,14 @@ class TMC2209Bank:
         run_current_ma: int = DEFAULT_RUN_CURRENT_MA,
         hold_current_ma: int = DEFAULT_HOLD_CURRENT_MA,
     ):
-        """Initialize all 4 TMC2209 drivers."""
+        """Initialize all TMC2209 drivers."""
         for drv in self.drivers:
             drv.init(run_current_ma, hold_current_ma)
             time.sleep_ms(10)
 
     def set_slot_current(self, slot: int, run_ma: int, hold_ma: int):
         """Set current for a specific slot's driver."""
-        if 0 <= slot < 4:
+        if 0 <= slot < len(self.drivers):
             self.drivers[slot].set_current(run_ma, hold_ma)
 
     def set_assist_current(self, slot: int, current_ma: int):

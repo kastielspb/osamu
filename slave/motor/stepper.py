@@ -4,7 +4,7 @@ Uses one PIO state machine per motor for jitter-free step generation.
 """
 
 import rp2
-from config import DIR_PINS, EN_PINS, STEP_PINS
+from config import DIR_PINS, EN_PINS, NUM_SLOTS, STEP_PINS
 from machine import Pin
 
 
@@ -147,10 +147,10 @@ class Stepper:
 
 
 class StepperBank:
-    """Manages all 4 stepper motors."""
+    """Manages all stepper motors."""
 
     def __init__(self, pio_block: int = 0):
-        self.motors = [Stepper(slot, pio_block) for slot in range(4)]
+        self.motors = [Stepper(slot, pio_block) for slot in range(NUM_SLOTS)]
 
     def stop_all(self):
         """Emergency stop all motors."""

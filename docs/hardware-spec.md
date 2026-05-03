@@ -35,7 +35,7 @@ The system follows a decentralised Master–Slave network topology. Instead of a
 - **Power:** DC-DC step-down converter (24 V → 5 V) to power logic from the power bus
 - **Peripherals:**
   - 4× microswitch filament sensors (slot inputs)
-  - 16× SK6812 / WS2812B addressable LEDs (slot status indication)
+  - 4× SK6812 / WS2812B addressable LEDs (1 per slot, slot status indication)
   - 2× RJ45 jacks (IN and OUT) for daisy-chain passthrough
 
 ### Interconnect Bus Pinout (RJ45 / T568B)

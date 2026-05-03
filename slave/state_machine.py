@@ -1,6 +1,6 @@
 """
 Main state machine and command dispatcher for the slave node.
-Coordinates 4 slots, handles RS485 commands, and manages watchdog.
+Coordinates filament slots, handles RS485 commands, and manages watchdog.
 """
 
 import struct
@@ -14,6 +14,7 @@ from config import (
     DEFAULT_HOLD_CURRENT_MA,
     DEFAULT_RUN_CURRENT_MA,
     DEVICE_ADDR_UNASSIGNED,
+    NUM_SLOTS,
     STALLGUARD_POLL_MS,
     WATCHDOG_TIMEOUT_MS,
 )
@@ -63,11 +64,11 @@ class SlaveController:
         # Slots
         self._slots = [
             Slot(i, self._steppers[i], self._tmc_bank.drivers[i], self._sensors[i])
-            for i in range(4)
+            for i in range(NUM_SLOTS)
         ]
 
         # Per-slot filament info (r, g, b, material); default green, unknown material
-        self._filament_data = [(0, 255, 0, b"")] * 4
+        self._filament_info = [(0, 255, 0, b"")] * NUM_SLOTS
 
         # Watchdog
         self._last_poll_time = time.ticks_ms()
@@ -155,14 +156,10 @@ class SlaveController:
         elif cmd == Cmd.GET_STATUS:
             states = bytes([s.state for s in self._slots])
             sensors = bytes([self._sensors.get_states()])
-            errors = bytes(
-                [
-                    self._slots[0].error_code
-                    | (self._slots[1].error_code << 2)
-                    | (self._slots[2].error_code << 4)
-                    | (self._slots[3].error_code << 6)
-                ]
-            )
+            errors_val = 0
+            for _i, _s in enumerate(self._slots):
+                errors_val |= _s.error_code << (_i * 2)
+            errors = bytes([errors_val])
             return states + sensors + errors
 
         elif cmd == Cmd.FEED:
@@ -171,8 +168,9 @@ class SlaveController:
 
             slot = data[0]
             speed = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             status = self._slots[slot].feed(speed)
             if status == Status.OK:
                 self._leds.set_feeding(slot)
@@ -181,10 +179,12 @@ class SlaveController:
         elif cmd == Cmd.RETRACT:
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
             speed = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             status = self._slots[slot].retract(speed)
             if status == Status.OK:
                 self._leds.set_feeding(slot)
@@ -193,10 +193,12 @@ class SlaveController:
         elif cmd == Cmd.SET_ASSIST:
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
             current = struct.unpack("<H", data[1:3])[0] if len(data) >= 3 else 0
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             status = self._slots[slot].set_assist(current)
             if status == Status.OK:
                 self._leds.set_assist(slot)
@@ -205,9 +207,11 @@ class SlaveController:
         elif cmd == Cmd.STOP:
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             status = self._slots[slot].stop()
             self._update_slot_led(slot)
             return bytes([status])
@@ -216,7 +220,7 @@ class SlaveController:
             for s in self._slots:
                 s.emergency_stop()
             self._steppers.stop_all()
-            for i in range(4):
+            for i in range(NUM_SLOTS):
                 self._update_slot_led(i)
             return bytes([Status.OK])
 
@@ -226,27 +230,31 @@ class SlaveController:
                 self._unique_id
                 + bytes([self._addr])
                 + struct.pack("BB", FW_VERSION[0], FW_VERSION[1])
-                + bytes([4])
+                + bytes([NUM_SLOTS])
             )
             return config
 
         elif cmd == Cmd.SET_CURRENT:
             if len(data) < 5:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
             run_ma = struct.unpack("<H", data[1:3])[0]
             hold_ma = struct.unpack("<H", data[3:5])[0]
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             self._tmc_bank.set_slot_current(slot, run_ma, hold_ma)
             return bytes([Status.OK])
 
         elif cmd == Cmd.HOME_SLOT:
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot = data[0]
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             # Home = feed until sensor triggers
             status = self._slots[slot].feed()
             return bytes([status])
@@ -254,11 +262,13 @@ class SlaveController:
         elif cmd == Cmd.SET_FILAMENT:
             if len(data) < 8:
                 return bytes([Status.ERROR_INVALID_SLOT])
+
             slot, r, g, b = data[0], data[1], data[2], data[3]
             material = data[4:8].rstrip(b"\x00")
-            if not (0 <= slot < 4):
+            if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
-            self._filament_data[slot] = (r, g, b, material)
+
+            self._filament_info[slot] = (r, g, b, material)
             if self._slots[slot].state == SlotState.LOADED:
                 self._update_slot_led(slot)
             return bytes([Status.OK])
@@ -272,7 +282,7 @@ class SlaveController:
         if state == SlotState.EMPTY:
             self._leds.set_slot(slot, LedMode.OFF)
         elif state == SlotState.LOADED:
-            r, g, b, _ = self._filament_data[slot]
+            r, g, b, _ = self._filament_info[slot]
             self._leds.set_slot(slot, LedMode.SOLID, r, g, b)
         elif state in (SlotState.FEEDING, SlotState.RETRACTING):
             self._leds.set_feeding(slot)
@@ -316,7 +326,7 @@ class SlaveController:
                 self._steppers.stop_all()
                 self._leds.set_all_off()
                 # Blink all red to indicate watchdog
-                for i in range(4):
+                for i in range(NUM_SLOTS):
                     self._leds.set_error(i)
             await asyncio.sleep_ms(500)
 

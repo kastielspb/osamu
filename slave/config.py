@@ -13,10 +13,12 @@ TMC_UART_ID = 1
 TMC_UART_TX_PIN = 4
 TMC_UART_RX_PIN = 5
 
-# --- Stepper Motors (4 slots) ---
+# --- Stepper Motors ---
 STEP_PINS = [6, 8, 10, 12]
 DIR_PINS = [7, 9, 11, 13]
 EN_PINS = [14, 15, 16, 17]
+
+NUM_SLOTS = len(STEP_PINS)  # Derived from pin config; change pin lists to resize
 
 # TMC2209 UART addresses (set via MS1/MS2 pins on each driver)
 TMC_ADDRESSES = [0, 1, 2, 3]
@@ -27,7 +29,6 @@ SENSOR_DEBOUNCE_MS = 5
 
 # --- WS2812B LED Strip ---
 LED_PIN = 22
-LED_COUNT = 16  # 4 per slot
 
 # --- Motor Defaults ---
 DEFAULT_RUN_CURRENT_MA = 800

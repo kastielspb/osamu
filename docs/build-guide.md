@@ -182,7 +182,7 @@ GND        ────── GND
 DIN        ────── GP22
 ```
 
-> First 4 LEDs = slot 0, next 4 = slot 1, etc. Cut exactly 16 LEDs.
+> 1 LED per slot. Cut exactly NUM_SLOTS LEDs (4 for the default 4-slot configuration).
 
 ### 2.6 Slave Box Power
 

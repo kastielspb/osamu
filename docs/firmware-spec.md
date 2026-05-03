@@ -414,7 +414,7 @@ sequenceDiagram
     participant S as Slave Box 0
 
     Note over S: Power-on boot
-    Note over S: _filament_info = [(0,255,0,b"")] × 4  (default green, unknown material)
+    Note over S: _filament_info = [(0,255,0,b"")] × NUM_SLOTS  (default green, unknown material)
 
     K->>E: MMU_HOME
     E->>M: broadcast DISCOVER

@@ -1,6 +1,6 @@
 """
 SK6812 RGBW / WS2812B LED strip driver using PIO on RP2350.
-4 LEDs per slot (16 total), individual slot color/mode control.
+1 LED per slot, individual slot color/mode control.
 Supports both SK6812 (RGBW, 32-bit) and WS2812B (RGB, 24-bit).
 """
 
@@ -9,7 +9,7 @@ import time
 
 import rp2
 from bus.protocol import LedMode
-from config import LED_COUNT, LED_PIN
+from config import LED_PIN, NUM_SLOTS
 from machine import Pin
 
 # Set to True for SK6812 RGBW, False for WS2812B RGB
@@ -36,10 +36,8 @@ def sk6812():
 class LEDStrip:
     """
     SK6812 RGBW / WS2812B LED strip controller.
-    16 LEDs total, 4 per slot. Supports solid, breathe, and blink modes.
+    1 LED per slot. Supports solid, breathe, and blink modes.
     """
-
-    LEDS_PER_SLOT = 4
 
     def __init__(self, rgbw: bool = RGBW_MODE):
         self._rgbw = rgbw
@@ -51,9 +49,9 @@ class LEDStrip:
         )
         self._sm.active(1)
 
-        self._buf = array.array("I", [0] * LED_COUNT)
-        self._modes = [LedMode.OFF] * 4  # Per-slot mode
-        self._colors = [(0, 0, 0, 0)] * 4  # Per-slot RGBW
+        self._buf = array.array("I", [0] * NUM_SLOTS)
+        self._modes = [LedMode.OFF] * NUM_SLOTS  # Per-slot mode
+        self._colors = [(0, 0, 0, 0)] * NUM_SLOTS  # Per-slot RGBW
         self._tick = 0
 
     def _pack_color(self, r: int, g: int, b: int, w: int = 0) -> int:
@@ -68,7 +66,7 @@ class LEDStrip:
 
     def _write(self):
         """Push buffer to LED strip."""
-        for i in range(LED_COUNT):
+        for i in range(NUM_SLOTS):
             self._sm.put(self._buf[i], 8)
         time.sleep_us(60)  # Reset pulse
 
@@ -82,7 +80,7 @@ class LEDStrip:
             r, g, b: Color values (0-255)
             w: White channel (0-255, SK6812 RGBW only)
         """
-        if not (0 <= slot < 4):
+        if not (0 <= slot < NUM_SLOTS):
             return
 
         self._modes[slot] = mode
@@ -90,9 +88,9 @@ class LEDStrip:
 
     def set_all_off(self):
         """Turn off all LEDs."""
-        for i in range(4):
+        for i in range(NUM_SLOTS):
             self._modes[i] = LedMode.OFF
-        self._buf = array.array("I", [0] * LED_COUNT)
+        self._buf = array.array("I", [0] * NUM_SLOTS)
         self._write()
 
     def update(self):
@@ -101,11 +99,9 @@ class LEDStrip:
         """
         self._tick += 1
 
-        for slot in range(4):
+        for slot in range(NUM_SLOTS):
             mode = self._modes[slot]
             r, g, b, w = self._colors[slot]
-            start = slot * self.LEDS_PER_SLOT
-
             if mode == LedMode.OFF:
                 color = 0
             elif mode == LedMode.SOLID:
@@ -126,8 +122,7 @@ class LEDStrip:
             else:
                 color = 0
 
-            for i in range(self.LEDS_PER_SLOT):
-                self._buf[start + i] = color
+            self._buf[slot] = color
 
         self._write()
 

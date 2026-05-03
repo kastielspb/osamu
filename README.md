@@ -35,7 +35,7 @@ OSAMU is a distributed multi-material filament feeding system for Klipper-based 
 - 4× Nema 14 (or 17) stepper motors
 - 1× MAX485 RS485 transceiver
 - 4× microswitch filament sensors
-- 16× SK6812/WS2812B addressable LEDs (4 per slot)
+- 4× SK6812/WS2812B addressable LEDs (1 per slot)
 - 1× DC-DC 24 V → 5 V converter (3 A+)
 - 2× RJ45 jacks (daisy-chain IN/OUT)
 

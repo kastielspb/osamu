@@ -4,7 +4,7 @@ Microswitch sensor driver with software debounce.
 
 import time
 
-from config import SENSOR_DEBOUNCE_MS, SENSOR_PINS
+from config import NUM_SLOTS, SENSOR_DEBOUNCE_MS, SENSOR_PINS
 from machine import Pin
 
 
@@ -59,10 +59,10 @@ class Sensor:
 
 
 class SensorBank:
-    """Manages all 4 slot sensors."""
+    """Manages all slot sensors."""
 
     def __init__(self):
-        self.sensors = [Sensor(i) for i in range(4)]
+        self.sensors = [Sensor(i) for i in range(NUM_SLOTS)]
 
     def update_all(self) -> list:
         """
