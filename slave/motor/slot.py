@@ -5,7 +5,7 @@ Manages motor, sensor, and state transitions.
 
 import time
 
-from bus.protocol import SlotState, Status
+from bus.protocol import LedMode, SlotState, Status
 from config import (
     DEFAULT_ASSIST_CURRENT_MA,
     DEFAULT_FEED_SPEED_HZ,
@@ -30,18 +30,22 @@ class Slot:
         ERROR      - Jam/timeout detected, needs reset
     """
 
-    def __init__(self, slot_id: int, stepper, tmc_driver, sensor):
+    def __init__(self, slot_id: int, stepper, tmc_driver, sensor, led_strip):
         """
         Args:
             slot_id: Slot index (0-3)
             stepper: Stepper instance for this slot
             tmc_driver: TMC2209 instance for this slot
             sensor: Sensor instance for this slot
+            led_strip: LEDStrip instance (shared, addressed by slot_id)
         """
         self.id = slot_id
         self._stepper = stepper
         self._tmc = tmc_driver
         self._sensor = sensor
+        self._led = led_strip
+        self._filament_color = (0, 255, 0)  # default green
+        self._filament_material = b""
         self._state = SlotState.EMPTY
         self._error_code = Status.OK
         self._operation_start = 0
@@ -59,11 +63,41 @@ class Slot:
     def has_filament(self) -> bool:
         return self._sensor.is_triggered
 
+    @property
+    def filament_color(self) -> tuple:
+        return self._filament_color
+
+    @property
+    def filament_material(self) -> bytes:
+        return self._filament_material
+
+    def set_filament(self, r: int, g: int, b: int, material: bytes):
+        """Set filament color and material. Updates LED if slot is loaded."""
+        self._filament_color = (r, g, b)
+        self._filament_material = material
+        if self._state == SlotState.LOADED:
+            self._update_led()
+
+    def _update_led(self):
+        """Sync LED to current slot state."""
+        if self._state == SlotState.EMPTY:
+            self._led.set_slot(self.id, LedMode.OFF)
+        elif self._state == SlotState.LOADED:
+            r, g, b = self._filament_color
+            self._led.set_slot(self.id, LedMode.SOLID, r, g, b)
+        elif self._state in (SlotState.FEEDING, SlotState.RETRACTING):
+            self._led.set_feeding(self.id)
+        elif self._state == SlotState.ASSIST:
+            self._led.set_assist(self.id)
+        elif self._state == SlotState.ERROR:
+            self._led.set_error(self.id)
+
     def _set_state(self, new_state: int):
-        """Transition to a new state."""
+        """Transition to a new state and sync LED."""
         self._state = new_state
         if new_state != SlotState.ERROR:
             self._error_code = Status.OK
+        self._update_led()
 
     def update_from_sensor(self):
         """
@@ -174,6 +208,7 @@ class Slot:
                 self._set_state(SlotState.ERROR)
                 self._error_code = Status.ERROR_TIMEOUT
                 return True
+
         elif self._state == SlotState.RETRACTING:
             elapsed = time.ticks_diff(time.ticks_ms(), self._operation_start)
             if elapsed > RETRACT_TIMEOUT_MS:
@@ -181,6 +216,7 @@ class Slot:
                 self._set_state(SlotState.ERROR)
                 self._error_code = Status.ERROR_TIMEOUT
                 return True
+
         return False
 
     def check_stallguard(self) -> bool:

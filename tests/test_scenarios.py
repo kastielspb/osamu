@@ -459,9 +459,10 @@ def test_scenario_8_set_filament_info(bus):
     )
 
     # Color stored
-    assert slave.ctrl._filament_info[1] == (255, 51, 0, b""), (
-        "Filament info must be stored in _filament_info[1]"
+    assert slave.ctrl._slots[1].filament_color == (255, 51, 0), (
+        "Filament color must be stored in slot[1]"
     )
+    assert slave.ctrl._slots[1].filament_material == b""
 
     # LED immediately solid with the new color (slot is LOADED)
     time.sleep(0.02)  # let _led_loop tick
@@ -483,9 +484,10 @@ def test_scenario_8_set_filament_info(bus):
     )
 
     # Color stored
-    assert slave.ctrl._filament_info[2] == (0, 200, 80, b""), (
-        "Filament info must be stored in _filament_info[2] even when EMPTY"
+    assert slave.ctrl._slots[2].filament_color == (0, 200, 80), (
+        "Filament color must be stored in slot[2] even when EMPTY"
     )
+    assert slave.ctrl._slots[2].filament_material == b""
 
     # LED must NOT have changed (slot is not LOADED)
     time.sleep(0.02)
@@ -534,8 +536,11 @@ def test_scenario_9_filament_info_after_power_cycle(bus):
 
     # --- Verify defaults right after boot ---
     for slot in range(4):
-        assert slave.ctrl._filament_info[slot] == (0, 255, 0, b""), (
-            f'Slot {slot}: default filament info must be (0, 255, 0, b"") on boot'
+        assert slave.ctrl._slots[slot].filament_color == (0, 255, 0), (
+            f"Slot {slot}: default filament color must be (0, 255, 0) on boot"
+        )
+        assert slave.ctrl._slots[slot].filament_material == b"", (
+            f"Slot {slot}: default filament material must be b\"\" on boot"
         )
 
     # Load slots 0, 1, 3 (slot 2 deliberately left empty — no filament push)
@@ -559,22 +564,27 @@ def test_scenario_9_filament_info_after_power_cycle(bus):
         )
 
     # Slot 0: explicitly set to same default green
-    assert slave.ctrl._filament_info[0] == (0, 255, 0, b"")
+    assert slave.ctrl._slots[0].filament_color == (0, 255, 0)
+    assert slave.ctrl._slots[0].filament_material == b""
     # Slot 1: updated to orange
-    assert slave.ctrl._filament_info[1] == (255, 51, 0, b"")
+    assert slave.ctrl._slots[1].filament_color == (255, 51, 0)
+    assert slave.ctrl._slots[1].filament_material == b""
     # Slot 3: updated to blue
-    assert slave.ctrl._filament_info[3] == (0, 0, 255, b"")
+    assert slave.ctrl._slots[3].filament_color == (0, 0, 255)
+    assert slave.ctrl._slots[3].filament_material == b""
     # Slot 2: never touched — still default green
-    assert slave.ctrl._filament_info[2] == (0, 255, 0, b""), (
+    assert slave.ctrl._slots[2].filament_color == (0, 255, 0), (
         "Slot 2 must retain default green — no SET_FILAMENT was issued"
     )
+    assert slave.ctrl._slots[2].filament_material == b""
 
     # LEDs for LOADED slots must reflect stored colors
     time.sleep(0.02)  # let _led_loop tick
     assert slave.ctrl._leds._colors[1][:3] == (255, 51, 0), "Slot 1 LED must be orange"
     assert slave.ctrl._leds._colors[3][:3] == (0, 0, 255), "Slot 3 LED must be blue"
     # Slot 2 is EMPTY — LED state is irrelevant but filament entry must still be default
-    assert slave.ctrl._filament_info[2] == (0, 255, 0, b"")
+    assert slave.ctrl._slots[2].filament_color == (0, 255, 0)
+    assert slave.ctrl._slots[2].filament_material == b""
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +625,8 @@ def test_scenario_10_set_filament_on_assisting_slot(bus):
     assert resp is not None and resp[0] == Status.OK, "SET_FILAMENT must return OK"
 
     # Filament info stored
-    assert slave.ctrl._filament_info[0] == (200, 100, 0, b""), "Filament info must be stored"
+    assert slave.ctrl._slots[0].filament_color == (200, 100, 0), "Filament color must be stored"
+    assert slave.ctrl._slots[0].filament_material == b""
 
     # LED must NOT have changed — slot is still in ASSIST
     time.sleep(0.02)
@@ -666,7 +677,8 @@ def test_scenario_10b_set_filament_on_idle_slot_during_assist(bus):
     assert resp is not None and resp[0] == Status.OK
 
     # Slot 2 LED updated immediately
-    assert slave.ctrl._filament_info[2] == (0, 0, 255, b"")
+    assert slave.ctrl._slots[2].filament_color == (0, 0, 255)
+    assert slave.ctrl._slots[2].filament_material == b""
     assert slave.ctrl._leds._modes[2] == LedMode.SOLID
     assert slave.ctrl._leds._colors[2][:3] == (0, 0, 255)
 
@@ -711,9 +723,10 @@ def test_scenario_11_filament_info_preserved_after_runout(bus):
 
     resp = master.query(slave.addr, Cmd.SET_FILAMENT, bytes([0, 220, 30, 30]) + b"PLA\x00")
     assert resp is not None and resp[0] == Status.OK, "SET_FILAMENT must return OK"
-    assert slave.ctrl._filament_info[0] == (220, 30, 30, b"PLA"), (
-        "_filament_info[0] must be (220, 30, 30, b'PLA') after SET_FILAMENT"
+    assert slave.ctrl._slots[0].filament_color == (220, 30, 30), (
+        "filament_color must be (220, 30, 30) after SET_FILAMENT"
     )
+    assert slave.ctrl._slots[0].filament_material == b"PLA"
 
     # Enter ASSIST (printing in progress)
     resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 0, 150))
@@ -730,9 +743,10 @@ def test_scenario_11_filament_info_preserved_after_runout(bus):
     )
 
     # --- Phase 2: Filament info must NOT be cleared by runout ---
-    assert slave.ctrl._filament_info[0] == (220, 30, 30, b"PLA"), (
-        "_filament_info must be preserved after runout — slave must not wipe it"
+    assert slave.ctrl._slots[0].filament_color == (220, 30, 30), (
+        "filament_color must be preserved after runout — slave must not wipe it"
     )
+    assert slave.ctrl._slots[0].filament_material == b"PLA"
 
     # --- Phase 3: New spool inserted (same material) → LOADED ---
     slave.inject_filament(0, True)
@@ -789,9 +803,10 @@ def test_scenario_12_new_filament_info_after_spool_swap(bus):
 
     resp = master.query(slave.addr, Cmd.SET_FILAMENT, bytes([1, 0, 80, 220]) + b"PETG")
     assert resp is not None and resp[0] == Status.OK, "Initial SET_FILAMENT must return OK"
-    assert slave.ctrl._filament_info[1] == (0, 80, 220, b"PETG"), (
-        "_filament_info[1] must reflect blue PETG"
+    assert slave.ctrl._slots[1].filament_color == (0, 80, 220), (
+        "filament_color[1] must reflect blue PETG"
     )
+    assert slave.ctrl._slots[1].filament_material == b"PETG"
 
     # --- Phase 1: Retract slot 1 (remove spool) ---
     retract_data = struct.pack("<BH", 1, 1000)
@@ -812,12 +827,13 @@ def test_scenario_12_new_filament_info_after_spool_swap(bus):
     assert resp is not None and resp[0] == Status.OK, (
         "SET_FILAMENT must be accepted while slot is EMPTY"
     )
-    assert slave.ctrl._filament_info[1] == (20, 180, 60, b"ABS"), (
-        "_filament_info[1] must be updated to green ABS"
+    assert slave.ctrl._slots[1].filament_color == (20, 180, 60), (
+        "filament_color[1] must be updated to green ABS"
     )
+    assert slave.ctrl._slots[1].filament_material == b"ABS"
     # Old blue PETG must be gone
-    assert slave.ctrl._filament_info[1] != (0, 80, 220, b"PETG"), (
-        "Old PETG info must no longer be stored"
+    assert slave.ctrl._slots[1].filament_color != (0, 80, 220), (
+        "Old PETG color must no longer be stored"
     )
 
     # --- Phase 3: New spool inserted → LOADED ---

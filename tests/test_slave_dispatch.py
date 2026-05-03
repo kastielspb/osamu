@@ -252,7 +252,8 @@ def test_set_filament_idle_slot():
     resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.OK
-    assert ctrl._filament_info[2] == (255, 128, 0, b"PETG")
+    assert ctrl._slots[2].filament_color == (255, 128, 0)
+    assert ctrl._slots[2].filament_material == b"PETG"
     # Slot is EMPTY, so LED should still be off
     assert ctrl._leds._modes[2] == LedMode.OFF
 
@@ -269,7 +270,8 @@ def test_set_filament_loaded_slot():
     resp = _send_frame(ctrl, Cmd.SET_FILAMENT, data)
     frame = _parse_response(resp)
     assert frame.data[0] == Status.OK
-    assert ctrl._filament_info[1] == (0, 0, 255, b"PLA")
+    assert ctrl._slots[1].filament_color == (0, 0, 255)
+    assert ctrl._slots[1].filament_material == b"PLA"
     # LED should immediately reflect the new color
     assert ctrl._leds._modes[1] == LedMode.SOLID
     assert ctrl._leds._colors[1][:3] == (0, 0, 255)
@@ -302,12 +304,12 @@ def test_loaded_led_uses_filament_color():
     """Default filament info (green, no material) used when slot transitions to LOADED."""
     ctrl = _make_controller()
     # Slot 3 starts EMPTY with default green (0, 255, 0, b"")
-    assert ctrl._filament_info[3] == (0, 255, 0, b"")
+    assert ctrl._slots[3].filament_color == (0, 255, 0)
+    assert ctrl._slots[3].filament_material == b""
 
-    # Trigger sensor → update_from_sensor → LOADED
+    # Trigger sensor → update_from_sensor → LOADED (LED updated internally)
     ctrl._sensors.sensors[3]._state = True
     ctrl._slots[3].update_from_sensor()
-    ctrl._update_slot_led(3)
 
     assert ctrl._leds._modes[3] == LedMode.SOLID
     assert ctrl._leds._colors[3][:3] == (0, 255, 0)

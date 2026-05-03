@@ -10,38 +10,25 @@
 #include "rs485.h"
 #include "protocol.h"
 #include <string.h>
+#include "board/gpio.h"
+#include "board/misc.h"
+#include "hardware/uart.h"
 
-// --- Platform abstraction (Klipper MCU internals) ---
-// These would be replaced by actual Klipper API calls in the final build.
+// --- Platform helpers ---
 
-// KLIPPER_API: GPIO operations
-static inline void gpio_out_setup(uint8_t pin, uint8_t val) {
-    // gpio_out_setup(pin, val) — Klipper internal
-    (void)pin; (void)val;
+// Map UART bus index (0 or 1) to the pico-sdk hardware instance.
+static inline uart_inst_t *_uart_inst(uint8_t bus) {
+    return bus == 0 ? uart0 : uart1;
 }
 
-static inline void gpio_out_write(uint8_t pin, uint8_t val) {
-    // gpio_out_write(pin, val) — Klipper internal
-    (void)pin; (void)val;
+// Transmit a buffer over the hardware UART (blocking until FIFO drains).
+static inline void _uart_write(uint8_t bus, const uint8_t *data, size_t len) {
+    uart_write_blocking(_uart_inst(bus), data, len);
 }
 
-// KLIPPER_API: UART operations
-static inline void uart_init(uint8_t bus, uint32_t baud, uint8_t tx, uint8_t rx) {
-    (void)bus; (void)baud; (void)tx; (void)rx;
-}
-
-static inline void uart_write(uint8_t bus, const uint8_t *data, size_t len) {
-    (void)bus; (void)data; (void)len;
-}
-
-static inline int uart_tx_complete(uint8_t bus) {
-    (void)bus;
-    return 1;
-}
-
-// KLIPPER_API: Timing
-static inline void udelay(uint32_t us) {
-    (void)us;
+// Returns non-zero when the TX FIFO has drained and the shift register is empty.
+static inline int _uart_tx_complete(uint8_t bus) {
+    return uart_is_writable(_uart_inst(bus));
 }
 
 // --- Ring buffer helpers ---
@@ -72,11 +59,16 @@ pmu_rs485_init(struct pmu_rs485 *rs485, const struct pmu_rs485_config *config)
     rs485->rx_tail = 0;
     rs485->seq_counter = 0;
 
-    // Configure DE pin as output, start in RX mode (LOW)
-    gpio_out_setup(config->de_pin, 0);
+    // Configure DE pin as output, start in RX mode (LOW = receive)
+    rs485->de_gpio = gpio_out_setup(config->de_pin, 0);
 
-    // Configure UART
-    uart_init(config->uart_bus, config->baud, config->tx_pin, config->rx_pin);
+    // Configure hardware UART: baud rate, 8N1
+    uart_inst_t *uart = _uart_inst(config->uart_bus);
+    uart_init(uart, config->baud);
+    uart_set_format(uart, 8, 1, UART_PARITY_NONE);
+    gpio_set_function(config->tx_pin, GPIO_FUNC_UART);
+    gpio_set_function(config->rx_pin, GPIO_FUNC_UART);
+    uart_set_fifo_enabled(uart, true);
 }
 
 void
@@ -108,19 +100,19 @@ void
 pmu_rs485_send_raw(struct pmu_rs485 *rs485, const uint8_t *frame, size_t len)
 {
     // Switch to TX mode
-    gpio_out_write(rs485->config.de_pin, 1);
-    udelay(5);  // Transceiver switching time
+    gpio_out_write(rs485->de_gpio, 1);
+    udelay(5);  // Transceiver switching time (~5 µs)
 
     // Send data
-    uart_write(rs485->config.uart_bus, frame, len);
+    _uart_write(rs485->config.uart_bus, frame, len);
 
-    // Wait for TX complete
-    while (!uart_tx_complete(rs485->config.uart_bus))
+    // Wait for TX FIFO and shift register to drain
+    while (!_uart_tx_complete(rs485->config.uart_bus))
         ;
 
-    // Small guard time then switch back to RX
+    // Guard time then switch back to RX
     udelay(50);
-    gpio_out_write(rs485->config.de_pin, 0);
+    gpio_out_write(rs485->de_gpio, 0);
 }
 
 int

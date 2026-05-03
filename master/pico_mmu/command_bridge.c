@@ -17,12 +17,11 @@
 #include "rs485.h"
 #include "protocol.h"
 
-// KLIPPER_API includes (these are actual Klipper MCU internal headers)
-// #include "board/gpio.h"
-// #include "board/misc.h"
-// #include "command.h"
-// #include "sched.h"
-// #include "basecmd.h"
+#include "board/gpio.h"
+#include "board/misc.h"
+#include "command.h"
+#include "sched.h"
+#include "basecmd.h"
 
 // --- Module state ---
 static struct pmu_rs485 rs485_bus;
@@ -59,8 +58,8 @@ command_config_pmu_rs485(uint32_t *args)
     // Reset pending query
     pending_query.active = 0;
 }
-// DECL_COMMAND(command_config_pmu_rs485,
-//              "config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u");
+DECL_COMMAND(command_config_pmu_rs485,
+             "config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u");
 
 /*
  * pmu_rs485_send addr=%c cmd=%c data=%*s
@@ -81,7 +80,7 @@ command_pmu_rs485_send(uint32_t *args)
 
     pmu_rs485_send(&rs485_bus, addr, cmd, data, data_len);
 }
-// DECL_COMMAND(command_pmu_rs485_send, "pmu_rs485_send addr=%c cmd=%c data=%*s");
+DECL_COMMAND(command_pmu_rs485_send, "pmu_rs485_send addr=%c cmd=%c data=%*s");
 
 /*
  * pmu_rs485_query addr=%c cmd=%c data=%*s timeout=%u
@@ -110,11 +109,10 @@ command_pmu_rs485_query(uint32_t *args)
     pending_query.active = 1;
     pending_query.seq = seq;
     pending_query.addr = addr;
-    // pending_query.deadline = timer_read_time() + timeout;  // KLIPPER_API
-    pending_query.deadline = timeout;  // Placeholder
+    pending_query.deadline = timer_read_time() + timeout;
 }
-// DECL_COMMAND(command_pmu_rs485_query,
-//              "pmu_rs485_query addr=%c cmd=%c data=%*s timeout=%u");
+DECL_COMMAND(command_pmu_rs485_query,
+             "pmu_rs485_query addr=%c cmd=%c data=%*s timeout=%u");
 
 /*
  * Response message sent to host when a frame is received from a slave.
@@ -123,12 +121,11 @@ command_pmu_rs485_query(uint32_t *args)
 static void
 send_rx_to_host(const struct pmu_frame *frame)
 {
-    // KLIPPER_API: sendf("pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s",
-    //                    frame->addr, frame->cmd, frame->seq,
-    //                    frame->data_len, frame->data);
-    (void)frame;
+    sendf("pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s",
+          frame->addr, frame->cmd, frame->seq,
+          frame->data_len, frame->data);
 }
-// DECL_OUTPUT(pmu_rs485_rx, "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s");
+DECL_OUTPUT(pmu_rs485_rx, "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s");
 
 // --- Task: periodic RS485 RX check ---
 
@@ -161,9 +158,17 @@ pmu_rs485_task(void)
 
     // Check query timeout
     if (pending_query.active) {
-        // KLIPPER_API: if (timer_is_before(pending_query.deadline, timer_read_time()))
-        // For now, just a placeholder check
-        // On timeout, send empty response to host to unblock it
+        if (timer_is_before(pending_query.deadline, timer_read_time())) {
+            // Deadline passed with no matching response — send empty reply to
+            // unblock the host-side lookup_query_command future.
+            struct pmu_frame timeout_frame;
+            timeout_frame.addr = pending_query.addr;
+            timeout_frame.cmd = PMU_CMD_DIR_RESPONSE;
+            timeout_frame.seq = pending_query.seq;
+            timeout_frame.data_len = 0;
+            send_rx_to_host(&timeout_frame);
+            pending_query.active = 0;
+        }
     }
 }
-// DECL_TASK(pmu_rs485_task);
+DECL_TASK(pmu_rs485_task);

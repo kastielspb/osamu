@@ -3,6 +3,7 @@ Pico-MMU Klipper Extras Module
 Orchestrates the distributed filament feeding system via Master MCU RS485 bridge.
 """
 
+import json
 import struct
 from enum import IntEnum
 
@@ -625,18 +626,18 @@ class PicoMmu:
     def _wait_master_sensor(self, timeout_s=60):
         """
         Wait for the master's filament sensor (endstop) to trigger.
-        Uses Klipper's endstop query mechanism.
+        Uses Klipper's filament_switch_sensor status interface.
         """
         endtime = self.reactor.monotonic() + timeout_s
-        # Get the filament sensor endstop object
         try:
             sensor = self.printer.lookup_object("filament_switch_sensor mmu_sensor")
             while self.reactor.monotonic() < endtime:
-                if sensor.filament_present:
+                eventtime = self.reactor.monotonic()
+                if sensor.get_status(eventtime)["filament_detected"]:
                     return True
                 self.reactor.pause(self.reactor.monotonic() + 0.05)
         except Exception:
-            # Fallback: just wait a reasonable time
+            # Sensor not configured — wait a fixed time as fallback
             self.reactor.pause(self.reactor.monotonic() + 5.0)
             return True
         return False
@@ -684,8 +685,10 @@ class PicoMmu:
         if svars is not None:
             saved = dict(svars.get_status(None)["variables"].get("mmu_tool_filaments", {}))
             saved[str(tool)] = [r, g, b, material]
-            svars.allVariables["mmu_tool_filaments"] = saved
-            svars._write_file()
+            self.gcode.run_script_from_command(
+                "SAVE_VARIABLE VARIABLE=mmu_tool_filaments VALUE='%s'"
+                % json.dumps(saved).replace("'", '"')
+            )
         canon = color_str.lstrip("#").upper()
         gcmd.respond_info("MMU: Tool T%d set to #%s material=%s" % (tool, canon, material or "?"))
 

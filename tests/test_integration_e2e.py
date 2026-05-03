@@ -113,7 +113,8 @@ def test_e2e_set_filament(bus):
     assert resp[0] == Status.OK
 
     # Verify filament info stored and LED updated
-    assert slave.ctrl._filament_info[2] == (255, 128, 0, b"PLA")
+    assert slave.ctrl._slots[2].filament_color == (255, 128, 0)
+    assert slave.ctrl._slots[2].filament_material == b"PLA"
     assert slave.ctrl._leds._modes[2] == LedMode.SOLID
     assert slave.ctrl._leds._colors[2][:3] == (255, 128, 0)
 

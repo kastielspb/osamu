@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "board/gpio.h"
 #include "protocol.h"
 
 // RS485 configuration
@@ -22,6 +23,7 @@ struct pmu_rs485_config {
 // RS485 instance state
 struct pmu_rs485 {
     struct pmu_rs485_config config;
+    struct gpio_out de_gpio;    // Direction Enable GPIO handle (Klipper board/gpio.h)
     // RX ring buffer
     uint8_t rx_buf[256];
     volatile uint16_t rx_head;

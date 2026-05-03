@@ -8,7 +8,7 @@ import time
 
 import uasyncio as asyncio
 import urandom
-from bus.protocol import Addr, Cmd, Frame, LedMode, SlotState, Status
+from bus.protocol import Addr, Cmd, Frame, SlotState, Status
 from bus.rs485 import RS485
 from config import (
     DEFAULT_HOLD_CURRENT_MA,
@@ -63,12 +63,9 @@ class SlaveController:
 
         # Slots
         self._slots = [
-            Slot(i, self._steppers[i], self._tmc_bank.drivers[i], self._sensors[i])
+            Slot(i, self._steppers[i], self._tmc_bank.drivers[i], self._sensors[i], self._leds)
             for i in range(NUM_SLOTS)
         ]
-
-        # Per-slot filament info (r, g, b, material); default green, unknown material
-        self._filament_info = [(0, 255, 0, b"")] * NUM_SLOTS
 
         # Watchdog
         self._last_poll_time = time.ticks_ms()
@@ -172,8 +169,6 @@ class SlaveController:
                 return bytes([Status.ERROR_INVALID_SLOT])
 
             status = self._slots[slot].feed(speed)
-            if status == Status.OK:
-                self._leds.set_feeding(slot)
             return bytes([status])
 
         elif cmd == Cmd.RETRACT:
@@ -186,8 +181,6 @@ class SlaveController:
                 return bytes([Status.ERROR_INVALID_SLOT])
 
             status = self._slots[slot].retract(speed)
-            if status == Status.OK:
-                self._leds.set_feeding(slot)
             return bytes([status])
 
         elif cmd == Cmd.SET_ASSIST:
@@ -200,8 +193,6 @@ class SlaveController:
                 return bytes([Status.ERROR_INVALID_SLOT])
 
             status = self._slots[slot].set_assist(current)
-            if status == Status.OK:
-                self._leds.set_assist(slot)
             return bytes([status])
 
         elif cmd == Cmd.STOP:
@@ -213,15 +204,12 @@ class SlaveController:
                 return bytes([Status.ERROR_INVALID_SLOT])
 
             status = self._slots[slot].stop()
-            self._update_slot_led(slot)
             return bytes([status])
 
         elif cmd == Cmd.STOP_ALL:
             for s in self._slots:
                 s.emergency_stop()
             self._steppers.stop_all()
-            for i in range(NUM_SLOTS):
-                self._update_slot_led(i)
             return bytes([Status.OK])
 
         elif cmd == Cmd.GET_CONFIG:
@@ -268,28 +256,11 @@ class SlaveController:
             if not (0 <= slot < NUM_SLOTS):
                 return bytes([Status.ERROR_INVALID_SLOT])
 
-            self._filament_info[slot] = (r, g, b, material)
-            if self._slots[slot].state == SlotState.LOADED:
-                self._update_slot_led(slot)
+            self._slots[slot].set_filament(r, g, b, material)
             return bytes([Status.OK])
 
         else:
             return bytes([Status.UNKNOWN_CMD])
-
-    def _update_slot_led(self, slot: int):
-        """Update LED based on current slot state."""
-        state = self._slots[slot].state
-        if state == SlotState.EMPTY:
-            self._leds.set_slot(slot, LedMode.OFF)
-        elif state == SlotState.LOADED:
-            r, g, b, _ = self._filament_info[slot]
-            self._leds.set_slot(slot, LedMode.SOLID, r, g, b)
-        elif state in (SlotState.FEEDING, SlotState.RETRACTING):
-            self._leds.set_feeding(slot)
-        elif state == SlotState.ASSIST:
-            self._leds.set_assist(slot)
-        elif state == SlotState.ERROR:
-            self._leds.set_error(slot)
 
     # --- Periodic tasks ---
 
@@ -303,15 +274,12 @@ class SlaveController:
                 # Handle retract completion (sensor cleared)
                 if not sensor.is_triggered and slot.state == SlotState.RETRACTING:
                     slot.on_retract_complete()
-                    self._update_slot_led(slot_id)
                 # Handle filament runout during assist mode
                 elif not sensor.is_triggered and slot.state == SlotState.ASSIST:
                     slot.stop()
-                    self._update_slot_led(slot_id)
                 # Handle idle state update
                 elif slot.state in (SlotState.EMPTY, SlotState.LOADED):
                     slot.update_from_sensor()
-                    self._update_slot_led(slot_id)
             await asyncio.sleep_ms(2)
 
     async def _watchdog_loop(self):
@@ -340,8 +308,6 @@ class SlaveController:
         """Check StallGuard for jam detection during active operations."""
         while True:
             for slot in self._slots:
-                if slot.check_timeout():
-                    self._update_slot_led(slot.id)
-                if slot.check_stallguard():
-                    self._leds.set_error(slot.id)
+                slot.check_timeout()
+                slot.check_stallguard()
             await asyncio.sleep_ms(STALLGUARD_POLL_MS)
