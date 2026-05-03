@@ -616,6 +616,134 @@ sequenceDiagram
 
 **Key invariant:** `RETRACT` on a LOADED slot is accepted regardless of what other slots are doing. The `retract()` method only checks the state of its own slot (`Slot` instance). If the slot is in ASSIST, `retract()` stops the assist motor first and then starts reverse — but here slot 2 is LOADED (idle), so it proceeds directly to RETRACTING.
 
+### Scenario 15: Infinite Spool (Slot-Chain Auto-Switch)
+
+**Context:** Two or more slots hold the same color/material and are configured as a group.
+While printing from slot 0 (ASSIST), the spool runs out — the slave sensor clears and the
+slot transitions `ASSIST → EMPTY`.  The Klipper extras module detects this on the next
+`GET_STATUS` poll, finds a loaded backup slot in the same group, and switches to it
+automatically without user intervention.
+
+**Configuration** (`printer.cfg`):
+
+```ini
+[pico_mmu]
+serial: /dev/serial/by-id/usb-Klipper_rp2350_XXXXX
+tool_count: 4
+# Explicit groups: T0 and T2 share group 1 (same red PLA roll)
+#                  T1 is ungrouped (0 = no auto-switch)
+slot_groups: 1,0,1,0
+
+[pico_mmu_slave box_0]
+unique_id: 0x0123456789ABCDEF
+slots: 0,1,2,3
+colors: FF0000,00FF00,FF0000,00FF00
+```
+
+If `slot_groups` is omitted, the extras module **auto-detects groups** by comparing
+filament colors: tools that share the same RGB value and number two or more are
+placed in an auto-generated group.  Explicit `slot_groups` entries always take
+priority over color-matching.
+
+**Group ID rules:**
+
+| Group ID | Meaning |
+|---|---|
+| `0` | Ungrouped — no auto-switch, even if color matches another slot |
+| `1`…`N` | Members of the same group switch to each other on runout |
+
+**Happy path — backup slot available:**
+
+```mermaid
+sequenceDiagram
+    participant E as Extras (pico_mmu.py)
+    participant M as Master MCU
+    participant S as Slave Box 0
+    participant Slot0 as Slot 0 (ASSIST, active spool)
+    participant Slot2 as Slot 2 (LOADED, backup spool)
+    participant K as Klipper Host
+
+    Note over Slot0: ASSIST — motor running, printing in progress
+    Note over Slot0: Spool runs out — sensor opens
+
+    Note over Slot0: sensor_loop detects clear during ASSIST
+    Note over Slot0: Motor stopped → Slot 0: ASSIST → EMPTY
+
+    E->>M: rs485_query(addr=1, GET_STATUS)
+    M->>S: GET_STATUS
+    S-->>M: [EMPTY, -, LOADED, -][sensors][errors]
+    M-->>E: slot 0 = EMPTY (was ASSIST last poll)
+
+    Note over E: ASSIST→EMPTY on current_tool → schedule _handle_runout()
+    Note over E: _find_backup_tool(T0) → group 1 → T2 is LOADED → backup = T2
+    Note over E: _do_switch_to_backup(T2)
+
+    E->>K: PAUSE
+    Note over E: state = TIP_FORMING
+    E->>K: G92 E0 / G1 E-5 F3600 / G1 E2 F1800 / G1 E-15 F3000 / G92 E0
+
+    E->>M: rs485_send(addr=1, FEED, slot=2, speed=800)
+    M->>S: FEED(slot=2)
+    Note over Slot2: state → FEEDING
+    S-->>M: [status: OK]
+    M-->>E: OK
+    Note over E: state = LOADING
+
+    Note over E: Wait for master filament sensor...
+    Note over E: Master sensor triggered!
+
+    E->>M: rs485_send(addr=1, SET_ASSIST, slot=2, current=150mA)
+    M->>S: SET_ASSIST(slot=2)
+    Note over Slot2: state → ASSIST
+    S-->>M: [status: OK]
+    M-->>E: OK
+
+    E->>K: G92 E0 / G1 E30 F300 / G92 E0 (load into hotend)
+    Note over E: current_tool = T2, state = PRINTING
+    E->>K: RESUME
+    E-->>K: "MMU: Infinite spool — switched from T0 to T2"
+```
+
+**Failure path — all group members empty:**
+
+```mermaid
+sequenceDiagram
+    participant E as Extras (pico_mmu.py)
+    participant K as Klipper Host
+
+    Note over E: Slot 0 ASSIST→EMPTY detected
+    Note over E: _find_backup_tool(T0) — T2 also EMPTY → returns None
+
+    E-->>K: "MMU: T0 exhausted — no loaded backup in group. Pausing print."
+    Note over E: state = ERROR
+    E->>K: PAUSE
+    Note over K: Print paused — user must load a new spool and resume
+```
+
+**Responsibility table:**
+
+| Concern | Owner |
+|---|---|
+| Spool runout detection (gate sensor) | Slave firmware (`_sensor_loop`) |
+| ASSIST → EMPTY transition | Slave state machine |
+| Runout event detection | Klipper extras (`_poll_slaves` comparing consecutive GET_STATUS) |
+| Group membership | Klipper extras (`_build_slot_groups`, `_effective_groups`) |
+| Backup slot selection | Klipper extras (`_find_backup_tool`) |
+| Switch execution (tip-form, load) | Klipper extras (`_do_switch_to_backup` → `_do_load`) |
+| Failure handling (no backup) | Klipper extras → PAUSE + STATE_ERROR |
+| Group config persistence | `printer.cfg` (`slot_groups`) or auto-color matching |
+
+**Key invariants:**
+- The RETRACT command is **not** sent during an infinite-spool switch (the slot is already
+  EMPTY); only tip-forming G-code is executed before loading the backup.
+- `current_tool` is updated to the new physical slot number after a successful switch.
+- A `_runout_scheduled` flag prevents duplicate reactor callbacks if multiple poll
+  responses arrive before the callback fires.
+- If the switch itself fails (`PicoMmuError`), an emergency stop is issued and the print
+  remains paused.
+
+---
+
 ### Scenario 14: System Block Diagram
 
 ```mermaid
@@ -1025,6 +1153,8 @@ gcode: MMU_CHANGE_TOOL TOOL=1
 | SET_FILAMENT_COLOR on idle slot during ASSIST | Integration (in-process) | Idle slot LED updated immediately; ASSIST slot LED unaffected |
 | Hot-plug (slave joins active bus) | Integration (in-process) | Assigned slave ignores DISCOVER; new slave is enumerated and polled without disrupting the first |
 | Stress polling | Hardware (8 slaves, 1 hour) | Packet loss < 0.1%, no hangs |
+| Infinite spool — group resolution | Unit (`test_pico_mmu_infinite_spool.py`) | Explicit groups, auto-color, override, backup find, runout dispatch all verified |
+| Infinite spool — slave switch sequence | Integration (in-process, Scenario 15) | Slave accepts FEED+STOP+ASSIST on backup slot; exhausted slot stays EMPTY |
 
 ---
 

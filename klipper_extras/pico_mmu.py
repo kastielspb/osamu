@@ -143,6 +143,30 @@ class PicoMmu:
                 except (ValueError, IndexError, TypeError):
                     pass
 
+        # Infinite spool: per-tool group IDs (0 = ungrouped).
+        # Format in printer.cfg:  slot_groups: 1,0,1,0
+        # One comma-separated integer per global tool, indexed from 0.
+        # Group 0 is the sentinel for "not in any group".
+        # Tools with the same non-zero ID switch to each other on runout.
+        # Omitted or all-zero means the feature is disabled.
+        raw_groups = config.get("slot_groups", "")
+        self._slot_groups: dict = {}
+        if raw_groups.strip():
+            for i, part in enumerate(raw_groups.split(",")):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    self._slot_groups[i] = int(part)
+                except ValueError:
+                    raise config.error(
+                        "pico_mmu: slot_groups entry %d is not an integer: '%s'" % (i, part)
+                    )
+        # Effective group map built by _build_slot_groups() after enumeration.
+        self._effective_groups: dict = {}
+        # Prevents scheduling more than one runout callback per poll cycle.
+        self._runout_scheduled = False
+
         # State
         self.state = STATE_IDLE
         self.current_tool = -1  # No tool loaded
@@ -227,7 +251,21 @@ class PicoMmu:
                 continue
             resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
             if resp and len(resp) >= 6:
-                slave.slot_states = list(resp[:4])
+                new_states = list(resp[:4])
+                old_states = list(slave.slot_states)
+                # Detect ASSIST→EMPTY on the currently printing slot.
+                if self.state == STATE_PRINTING and self.current_tool >= 0:
+                    ct_slave, ct_local = self._resolve_tool(self.current_tool)
+                    if (
+                        ct_slave is slave
+                        and ct_local < len(old_states)
+                        and old_states[ct_local] == SlotState.ASSIST
+                        and new_states[ct_local] == SlotState.EMPTY
+                        and not self._runout_scheduled
+                    ):
+                        self._runout_scheduled = True
+                        self.reactor.register_callback(self._handle_runout)
+                slave.slot_states = new_states
             else:
                 slave.online = False
 
@@ -270,6 +308,132 @@ class PicoMmu:
                                 slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([j, r, g, b])
                             )
                 next_addr += 1
+        self._build_slot_groups()
+
+    # --- Infinite spool: group resolution ---
+
+    def _build_slot_groups(self):
+        """
+        Build the effective per-tool group map from two sources:
+
+        1. Explicit ``slot_groups`` config (highest priority).
+           An explicit entry of 0 marks a tool as intentionally ungrouped,
+           even if its color would otherwise create an auto-group.
+        2. Auto-color matching: tools that share the same filament color and
+           are *not* explicitly assigned a group are grouped automatically
+           when two or more tools share that color.
+
+        Stores the result in ``self._effective_groups``
+        (``dict[tool_num -> group_id]``; only non-zero entries are stored).
+        """
+        explicit = self._slot_groups
+        max_explicit = max(explicit.values(), default=0) if explicit else 0
+
+        # Collect ungrouped tools per color.
+        color_tools: dict = {}
+        for tool, color in self._tool_colors.items():
+            if explicit.get(tool, 0) == 0:  # not explicitly assigned
+                if color not in color_tools:
+                    color_tools[color] = []
+                color_tools[color].append(tool)
+
+        # Assign synthetic group IDs to colors shared by ≥2 ungrouped tools.
+        auto: dict = {}
+        next_gid = max_explicit + 1
+        for color, tools in color_tools.items():
+            if len(tools) >= 2:
+                for t in tools:
+                    auto[t] = next_gid
+                next_gid += 1
+
+        # Merge: explicit entries override auto (including explicit 0 = ungrouped).
+        merged: dict = dict(auto)
+        for tool, gid in explicit.items():
+            merged[tool] = gid
+
+        # Drop explicit-zero entries; 0 is the sentinel for "no group".
+        self._effective_groups = {t: g for t, g in merged.items() if g != 0}
+
+    def _get_group(self, tool):
+        """Return the effective group ID for *tool*, or None if ungrouped."""
+        gid = self._effective_groups.get(tool, 0)
+        return gid if gid else None
+
+    def _find_backup_tool(self, current_tool):
+        """
+        Find the first LOADED tool in the same infinite-spool group as
+        *current_tool*, or return None if no backup is available.
+        """
+        gid = self._get_group(current_tool)
+        if gid is None:
+            return None
+        for tool, g in self._effective_groups.items():
+            if tool == current_tool or g != gid:
+                continue
+            slave, local_slot = self._resolve_tool(tool)
+            if slave is None or not slave.online:
+                continue
+            if slave.slot_states[local_slot] == SlotState.LOADED:
+                return tool
+        return None
+
+    # --- Infinite spool: runout handler ---
+
+    def _handle_runout(self, eventtime):
+        """
+        Reactor callback fired when the active slot transitions ASSIST→EMPTY
+        during printing.  Finds a backup slot in the same group and switches
+        to it automatically, or pauses the print if none is available.
+        """
+        self._runout_scheduled = False
+        if self.state != STATE_PRINTING or self.current_tool < 0:
+            return
+        backup = self._find_backup_tool(self.current_tool)
+        if backup is None:
+            self.gcode.respond_info(
+                "MMU: T%d exhausted — no loaded backup in group. Pausing print." % self.current_tool
+            )
+            self.state = STATE_ERROR
+            self.gcode.run_script_from_command("PAUSE")
+            return
+        self.gcode.respond_info(
+            "MMU: T%d exhausted — switching to T%d (infinite spool)" % (self.current_tool, backup)
+        )
+        self._do_switch_to_backup(backup)
+
+    def _do_switch_to_backup(self, new_tool):
+        """
+        Perform an automatic infinite-spool switch to *new_tool*.
+
+        The exhausted slot is already EMPTY, so we skip the RETRACT command
+        (which would return ERR_SLOT_EMPTY) and go straight to tip-forming
+        followed by a normal load of the backup slot.
+        """
+        old_tool = self.current_tool
+        try:
+            # Tip-forming only (no RETRACT — filament already retracted by runout).
+            self.state = STATE_TIP_FORMING
+            self.gcode.run_script_from_command("PAUSE")
+            self.gcode.run_script_from_command("G92 E0")
+            self.gcode.run_script_from_command("G1 E-5 F3600")
+            self.gcode.run_script_from_command("G1 E2 F1800")
+            self.gcode.run_script_from_command("G1 E-15 F3000")
+            self.gcode.run_script_from_command("G92 E0")
+
+            slave, local_slot = self._resolve_tool(new_tool)
+            # gcmd is None — _do_load does not use it directly.
+            self._do_load(None, slave, local_slot, new_tool)
+
+            self.current_tool = new_tool
+            self.state = STATE_PRINTING
+            self.gcode.run_script_from_command("RESUME")
+            self.gcode.respond_info(
+                "MMU: Infinite spool — switched from T%d to T%d" % (old_tool, new_tool)
+            )
+        except PicoMmuError as e:
+            self.state = STATE_ERROR
+            self._emergency_stop()
+            self.gcode.respond_info("MMU: Infinite spool switch failed: %s" % e)
 
     # --- Tool resolution ---
 
@@ -508,6 +672,7 @@ class PicoMmu:
         if not slave.online:
             raise gcmd.error("MMU: Slave for T%d is offline" % tool)
         self._tool_colors[tool] = (r, g, b)
+        self._build_slot_groups()
         self._rs485_send(slave.addr, Cmd.SET_FILAMENT_COLOR, bytes([local_slot, r, g, b]))
         # Persist overrides via [save_variables]
         svars = self.printer.lookup_object("save_variables", None)

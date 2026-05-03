@@ -18,6 +18,7 @@ Each test corresponds to one of the numbered scenarios in the specification:
   Scenario 12 — Short Retracts During Active Print (ASSIST Unaffected)
   Scenario 13 — RETRACT on an Idle Slot While Another Is in ASSIST
   Scenario 14 — System Block Diagram (no test)
+  Scenario 15 — Infinite Spool (Slot-Chain Auto-Switch)
 
 The tests exercise the complete slave firmware stack (state_machine →
 bus/rs485 → bus/protocol) via in-process pipes.  No real hardware is
@@ -797,3 +798,95 @@ def test_scenario_13_retract_idle_slot_during_assist(bus):
     status = master.query(slave.addr, Cmd.GET_STATUS)
     assert status[1] == SlotState.ASSIST, "Slot 1 must still be ASSIST after slot 2 completes"
     assert status[2] == SlotState.EMPTY, "Slot 2 must be EMPTY after retract complete"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 15: Infinite Spool — slave-level switch sequence
+# Ref: firmware-spec.md §Scenario 15
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_15_infinite_spool_slave_sequence(bus):
+    """
+    Validates the slave-firmware half of an infinite-spool auto-switch.
+
+    The Klipper extras layer orchestrates the switch; this test verifies that
+    the slave accepts the exact command sequence that pico_mmu.py will issue
+    and transitions slot states correctly throughout.
+
+    Setup:
+    - Slot 0: active spool, placed in ASSIST (printing in progress)
+    - Slot 2: backup spool, LOADED and waiting
+
+    Switch sequence (mirrors _do_switch_to_backup):
+    1. Spool for slot 0 runs out — slave sensor opens → slot 0 → EMPTY
+    2. Master feeds slot 2 → FEEDING
+    3. Master sensor triggered → STOP slot 2 → LOADED
+    4. Master sets ASSIST on slot 2 → ASSIST
+
+    Validates:
+    - Sensor runout during ASSIST causes slot 0 → EMPTY autonomously
+    - Slave accepts FEED on slot 2 while slot 0 is EMPTY (no interference)
+    - STOP returns slot 2 to LOADED (filament still present)
+    - SET_ASSIST on slot 2 returns OK and transitions slot 2 to ASSIST
+    - Slot 0 remains EMPTY throughout — no spurious resurrection
+    """
+    master, slave = bus
+
+    # --- Setup: slots 0 and 2 loaded ---
+    slave.inject_filament(0, True)
+    slave.inject_filament(2, True)
+    time.sleep(0.05)  # sensor debounce
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.LOADED, "Slot 0 must start LOADED"
+    assert status[2] == SlotState.LOADED, "Slot 2 must start LOADED"
+
+    # --- Phase 1: Enter ASSIST on slot 0 (printing starts) ---
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 0, 150))
+    assert resp is not None and resp[0] == Status.OK, "SET_ASSIST must return OK"
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[0] == SlotState.ASSIST, "Slot 0 must be in ASSIST"
+    assert status[2] == SlotState.LOADED, "Slot 2 must remain LOADED"
+
+    # --- Phase 2: Spool for slot 0 runs out — sensor opens ---
+    slave.inject_filament(0, False)
+    # Wait for debounce (5 ms) + sensor_loop (2 ms poll) + margin
+    time.sleep(0.05)
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status is not None
+    assert status[0] == SlotState.EMPTY, (
+        f"Slot 0 must be EMPTY after spool runout during ASSIST, got {status[0]}"
+    )
+    assert status[2] == SlotState.LOADED, "Slot 2 must remain LOADED after slot 0 runout"
+
+    # --- Phase 3: Feed slot 2 (backup spool) ---
+    resp = master.query(slave.addr, Cmd.FEED, struct.pack("<BH", 2, 800))
+    assert resp is not None and resp[0] == Status.OK, "FEED on backup slot must return OK"
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[2] == SlotState.FEEDING, f"Slot 2 must be FEEDING, got {status[2]}"
+    assert status[0] == SlotState.EMPTY, "Slot 0 must remain EMPTY during slot 2 feed"
+
+    # --- Phase 4: Master sensor triggered → stop slot 2 ---
+    resp = master.query(slave.addr, Cmd.STOP, bytes([2]))
+    assert resp is not None and resp[0] == Status.OK, "STOP must return OK"
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[2] == SlotState.LOADED, (
+        f"Slot 2 must be LOADED after STOP (filament still present), got {status[2]}"
+    )
+
+    # --- Phase 5: Enter ASSIST on slot 2 (backup now the active spool) ---
+    resp = master.query(slave.addr, Cmd.SET_ASSIST, struct.pack("<BH", 2, 150))
+    assert resp is not None and resp[0] == Status.OK, "SET_ASSIST on slot 2 must return OK"
+
+    status = master.query(slave.addr, Cmd.GET_STATUS)
+    assert status[2] == SlotState.ASSIST, (
+        f"Slot 2 must be in ASSIST after switch completes, got {status[2]}"
+    )
+    assert status[0] == SlotState.EMPTY, (
+        "Slot 0 must remain EMPTY throughout — no spurious state change"
+    )
