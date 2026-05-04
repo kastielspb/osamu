@@ -1,0 +1,35 @@
+services:
+  integration-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Pin to a specific commit for reproducibility.
+        # Update this when you want a newer Klipper base.
+        KLIPPER_REF: master
+    image: osamu-integration-test:latest
+    command: /app/tests/entrypoint.sh
+
+    environment:
+      # Slave simulator settings — must match printer_test.cfg slave count.
+      SLAVE_COUNT: "2"
+      SLAVE_SIM_HOST: "127.0.0.1"
+      SLAVE_SIM_PORT: "9000"
+      # Klippy settings
+      KLIPPY_LOG: /tmp/klippy.log
+      KLIPPY_SOCKET: /tmp/klippy_uds
+      # Pass-through: set PYTEST_ARGS="-k test_mmu_home" to run one test.
+      PYTEST_ARGS: ""
+
+    volumes:
+      # Bind-mount source so edits to Python files take effect without rebuild.
+      # The compiled klipper.elf and Klipper Python tree come from the image.
+      - ./klipper_extras:/app/klipper_extras:ro
+      - ./tests:/app/tests:ro
+      - ./slave:/app/slave:ro
+
+    # All processes run in the same network namespace (loopback TCP is enough).
+    network_mode: none
+
+    # Propagate the pytest exit code out to the host.
+    restart: "no"

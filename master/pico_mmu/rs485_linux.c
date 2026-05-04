@@ -20,8 +20,6 @@
 #include "rs485.h"
 #include "protocol.h"
 
-#include "board/gpio.h"   /* gpio_out_setup — no-op on Linux */
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -123,8 +121,8 @@ pmu_rs485_init(struct pmu_rs485 *rs485, const struct pmu_rs485_config *config)
     rs485->rx_tail   = 0;
     rs485->seq_counter = 0;
 
-    /* DE pin: no-op on Linux (gpio_out_setup returns a zeroed struct). */
-    rs485->de_gpio = gpio_out_setup(config->de_pin, 0);
+    /* DE pin: not used on Linux (TCP transport). Skip gpio_out_setup. */
+    memset(&rs485->de_gpio, 0, sizeof(rs485->de_gpio));
 
     if (sim_fd >= 0) {
         close(sim_fd);

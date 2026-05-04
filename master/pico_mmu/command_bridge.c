@@ -38,7 +38,7 @@ static struct {
 // --- Klipper command handlers ---
 
 /*
- * config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u
+ * config_pmu_rs485 uart_bus=%c tx_line=%u rx_line=%u de_line=%u baud=%u
  *
  * Configure the RS485 bus interface.
  */
@@ -59,7 +59,7 @@ command_config_pmu_rs485(uint32_t *args)
     pending_query.active = 0;
 }
 DECL_COMMAND(command_config_pmu_rs485,
-             "config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u");
+             "config_pmu_rs485 uart_bus=%c tx_line=%u rx_line=%u de_line=%u baud=%u");
 
 /*
  * pmu_rs485_send addr=%c cmd=%c data=%*s
@@ -76,7 +76,7 @@ command_pmu_rs485_send(uint32_t *args)
     uint8_t addr = args[0];
     uint8_t cmd = args[1];
     uint8_t data_len = args[2];
-    uint8_t *data = (uint8_t *)(uintptr_t)args[3];
+    uint8_t *data = command_decode_ptr(args[3]);
 
     pmu_rs485_send(&rs485_bus, addr, cmd, data, data_len);
 }
@@ -97,7 +97,7 @@ command_pmu_rs485_query(uint32_t *args)
     uint8_t addr = args[0];
     uint8_t cmd = args[1];
     uint8_t data_len = args[2];
-    uint8_t *data = (uint8_t *)(uintptr_t)args[3];
+    uint8_t *data = command_decode_ptr(args[3]);
     uint32_t timeout = args[4];
 
     // Flush any stale RX data
@@ -125,7 +125,6 @@ send_rx_to_host(const struct pmu_frame *frame)
           frame->addr, frame->cmd, frame->seq,
           frame->data_len, frame->data);
 }
-DECL_OUTPUT(pmu_rs485_rx, "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s");
 
 // --- Task: periodic RS485 RX check ---
 
@@ -168,6 +167,10 @@ pmu_rs485_task(void)
             timeout_frame.data_len = 0;
             send_rx_to_host(&timeout_frame);
             pending_query.active = 0;
+        } else {
+            // Keep the task loop awake so we can poll the TCP socket
+            // continuously while waiting for the slave's response.
+            sched_wake_tasks();
         }
     }
 }

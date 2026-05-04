@@ -540,7 +540,7 @@ def test_scenario_9_filament_info_after_power_cycle(bus):
             f"Slot {slot}: default filament color must be (0, 255, 0) on boot"
         )
         assert slave.ctrl._slots[slot].filament_material == b"", (
-            f"Slot {slot}: default filament material must be b\"\" on boot"
+            f'Slot {slot}: default filament material must be b"" on boot'
         )
 
     # Load slots 0, 1, 3 (slot 2 deliberately left empty — no filament push)

@@ -13,6 +13,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: requires live Klipper + slave simulator (run via make integration-test)"]
 
 [tool.ruff]
 line-length = 100
@@ -26,3 +28,6 @@ select = ["E", "F", "I"]
 "tests/micropython_shims/time.py" = ["F403"]
 "tests/test_protocol_c.py" = ["E402"]
 "tests/test_slave_dispatch.py" = ["E402"]
+# pytest fixtures legitimately reuse names from outer scope (F811) and
+# dependency-ordering fixtures appear unused to static analysis (F841/ARG001).
+"tests/test_integration_klipper.py" = ["F811", "F841"]

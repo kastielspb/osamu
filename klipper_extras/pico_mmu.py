@@ -214,11 +214,12 @@ class PicoMmu:
         self.rs485_query_cmd = self.mcu.lookup_query_command(
             "pmu_rs485_query addr=%c cmd=%c data=%*s timeout=%u",
             "pmu_rs485_rx addr=%c cmd=%c seq=%c data=%*s",
+            is_async=True,
         )
 
         # Configure RS485 bus
         self.mcu.lookup_command(
-            "config_pmu_rs485 uart_bus=%c tx_pin=%u rx_pin=%u de_pin=%u baud=%u"
+            "config_pmu_rs485 uart_bus=%c tx_line=%u rx_line=%u de_line=%u baud=%u"
         ).send([1, 0, 1, 2, self.baud])  # UART1, pins from config
 
         # Start polling timer
@@ -238,7 +239,7 @@ class PicoMmu:
 
     def _rs485_query(self, addr, cmd, data=b"", timeout_ms=50):
         """Send an RS485 frame and wait for response."""
-        timeout_ticks = int(timeout_ms * self.mcu.get_adjusted_freq() / 1000)
+        timeout_ticks = self.mcu.seconds_to_clock(timeout_ms / 1000.0)
         params = self.rs485_query_cmd.send([addr, cmd, data, timeout_ticks])
         if params is None:
             return None

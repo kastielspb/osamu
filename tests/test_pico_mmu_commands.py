@@ -24,8 +24,7 @@ Scenarios:
 import importlib.util
 import json
 import os
-import struct
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Import pico_mmu without a Klipper runtime.
@@ -164,9 +163,7 @@ def test_home_enrolls_known_slave():
     assert mmu.state == STATE_IDLE
 
     # Filament info for all 4 slots must have been sent
-    set_fil_calls = [
-        c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT
-    ]
+    set_fil_calls = [c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
     assert len(set_fil_calls) == 4, (
         f"Expected 4 SET_FILAMENT sends during home, got {len(set_fil_calls)}"
     )
@@ -400,7 +397,12 @@ def test_set_filament_stores_and_persists():
     slave = _make_slave(slots=[0, 1, 2, 3], online=True, addr=1)
     mmu = _make_mmu(
         slaves=[slave],
-        tool_filaments={0: (0, 255, 0, ""), 1: (0, 255, 0, ""), 2: (0, 255, 0, ""), 3: (0, 255, 0, "")},
+        tool_filaments={
+            0: (0, 255, 0, ""),
+            1: (0, 255, 0, ""),
+            2: (0, 255, 0, ""),
+            3: (0, 255, 0, ""),
+        },
     )
 
     # Provide a fake save_variables object
@@ -414,15 +416,13 @@ def test_set_filament_stores_and_persists():
     assert mmu._tool_filaments[1] == (255, 51, 0, "PLA")
 
     # RS485 SET_FILAMENT sent with correct slot and color
-    set_fil_calls = [
-        c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT
-    ]
+    set_fil_calls = [c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
     assert len(set_fil_calls) == 1
     payload = set_fil_calls[0][0][2]
-    assert payload[0] == 1   # local slot index
+    assert payload[0] == 1  # local slot index
     assert payload[1] == 255  # R
-    assert payload[2] == 51   # G
-    assert payload[3] == 0    # B
+    assert payload[2] == 51  # G
+    assert payload[3] == 0  # B
 
     # SAVE_VARIABLE must have been called with the serialized dict
     save_calls = [
