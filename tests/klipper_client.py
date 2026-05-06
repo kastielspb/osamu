@@ -52,6 +52,23 @@ class SimControl:
         if not reply.get("ok"):
             raise RuntimeError(f"inject_filament failed: {reply}")
 
+    def inject_filament_delayed(
+        self, slave_idx: int, slot: int, present: bool, delay_s: float
+    ) -> threading.Timer:
+        """
+        Schedule an inject_filament call to fire after *delay_s* seconds in
+        a background daemon thread.  Returned so callers can cancel.
+
+        Used by integration tests to mimic real hardware: the slave's stepper
+        physically pulls filament out during a RETRACT, so the master sensor
+        clears mid-operation.  The simulator can't actuate filament, so the
+        test side schedules the sensor-clear instead.
+        """
+        timer = threading.Timer(delay_s, lambda: self.inject_filament(slave_idx, slot, present))
+        timer.daemon = True
+        timer.start()
+        return timer
+
     def status(self) -> list:
         reply = self._send({"action": "status"})
         if not reply.get("ok"):
@@ -93,7 +110,9 @@ class KlipperClient:
         self._buf = b""
         self._gcode_log.clear()
         # Subscribe to gcode output so respond_info() reaches us as notifications.
-        self.call("gcode/subscribe_output", {"response_template": {"method": "notify_gcode_response"}})
+        self.call(
+            "gcode/subscribe_output", {"response_template": {"method": "notify_gcode_response"}}
+        )
 
     def close(self) -> None:
         if self._sock:

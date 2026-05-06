@@ -59,7 +59,7 @@ if SLAVE_DIR not in sys.path:
 from bus.protocol import Addr, FrameReader  # noqa: E402
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [sim] %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )

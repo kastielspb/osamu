@@ -139,6 +139,11 @@ class SlaveController:
         self._watchdog_triggered = False
 
         # Dispatch
+        if frame.cmd == Cmd.SET_ASSIST or frame.cmd == 0x0A:
+            print(
+                f"_handle_frame: got SET_ASSIST cmd={frame.cmd} addr={frame.addr} seq={frame.seq} data={frame.data.hex()}",
+                flush=True,
+            )
         response_data = self._dispatch_command(frame.cmd, frame.data)
         if response_data is not None and frame.addr != Addr.BROADCAST:
             await self._rs485.send_response(self._addr, frame.cmd, frame.seq, response_data)
@@ -157,6 +162,8 @@ class SlaveController:
             for _i, _s in enumerate(self._slots):
                 errors_val |= _s.error_code << (_i * 2)
             errors = bytes([errors_val])
+            if states[0] != 0 and states[0] != 1:
+                print(f"GET_STATUS: slot0_state={states[0]} (unexpected!)", flush=True)
             return states + sensors + errors
 
         elif cmd == Cmd.FEED:
@@ -169,6 +176,11 @@ class SlaveController:
                 return bytes([Status.ERROR_INVALID_SLOT])
 
             status = self._slots[slot].feed(speed)
+            if status != Status.OK:
+                print(
+                    f"FEED slot={slot} state={self._slots[slot].state} → status={status}",
+                    flush=True,
+                )
             return bytes([status])
 
         elif cmd == Cmd.RETRACT:
@@ -184,6 +196,7 @@ class SlaveController:
             return bytes([status])
 
         elif cmd == Cmd.SET_ASSIST:
+            print(f"SET_ASSIST dispatch: cmd={cmd} data={data.hex()}", flush=True)
             if len(data) < 1:
                 return bytes([Status.ERROR_INVALID_SLOT])
 

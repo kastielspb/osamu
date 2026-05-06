@@ -110,6 +110,8 @@ def _make_mmu(
     mmu.reactor = MagicMock()
     mmu.reactor.monotonic.return_value = 0.0
     mmu.printer = MagicMock()
+    mmu._poll_timer = None
+    mmu._bus_busy = False
 
     mmu.mcu = MagicMock()
     mmu.rs485_cmd = MagicMock()
@@ -163,9 +165,9 @@ def test_home_enrolls_known_slave():
     assert mmu.state == STATE_IDLE
 
     # Filament info for all 4 slots must have been sent
-    set_fil_calls = [c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
+    set_fil_calls = [c for c in mmu._rs485_query.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
     assert len(set_fil_calls) == 4, (
-        f"Expected 4 SET_FILAMENT sends during home, got {len(set_fil_calls)}"
+        f"Expected 4 SET_FILAMENT queries during home, got {len(set_fil_calls)}"
     )
 
 
@@ -416,7 +418,7 @@ def test_set_filament_stores_and_persists():
     assert mmu._tool_filaments[1] == (255, 51, 0, "PLA")
 
     # RS485 SET_FILAMENT sent with correct slot and color
-    set_fil_calls = [c for c in mmu._rs485_send.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
+    set_fil_calls = [c for c in mmu._rs485_query.call_args_list if c[0][1] == Cmd.SET_FILAMENT]
     assert len(set_fil_calls) == 1
     payload = set_fil_calls[0][0][2]
     assert payload[0] == 1  # local slot index
@@ -496,3 +498,64 @@ def test_set_filament_offline_slave_raises():
     gcmd.error.assert_called_once()
     msg = gcmd.error.call_args[0][0]
     assert "offline" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# CMD-14: get_status — Moonraker / Fluidd payload shape
+# ---------------------------------------------------------------------------
+
+
+def test_get_status_payload_shape():
+    """
+    The status object exposed under `printer.pico_mmu` must include the
+    top-level state, current/target tool, and a flat per-tool list with
+    color/material/state fields a Fluidd template can render directly.
+    """
+    slave_a = _make_slave(slots=[0, 1, 2, 3], uid=_UID_A, online=True, addr=1)
+    slave_b = _make_slave(slots=[4, 5, 6, 7], uid=_UID_B, online=False, addr=0)
+    slave_a.slot_states = [
+        SlotState.LOADED,
+        SlotState.ASSIST,
+        SlotState.EMPTY,
+        SlotState.ERROR,
+    ]
+    mmu = _make_mmu(
+        slaves=[slave_a, slave_b],
+        tool_count=8,
+        state=_mod.STATE_PRINTING,
+        current_tool=1,
+        tool_filaments={
+            0: (255, 0, 0, "PLA"),
+            1: (0, 255, 0, "PETG"),
+        },
+    )
+    mmu._effective_groups = {0: 1, 4: 1}
+
+    status = mmu.get_status(eventtime=0.0)
+
+    assert status["state"] == _mod.STATE_PRINTING
+    assert status["current_tool"] == 1
+    assert status["target_tool"] == -1
+    assert status["tool_count"] == 8
+
+    tools = status["tools"]
+    assert [t["tool"] for t in tools] == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    t0, t1, t3, t4 = tools[0], tools[1], tools[3], tools[4]
+    assert t0 == {
+        "tool": 0,
+        "slave_addr": 1,
+        "online": True,
+        "state": "LOADED",
+        "color": "FF0000",
+        "material": "PLA",
+        "group": 1,
+    }
+    assert t1["state"] == "ASSIST" and t1["color"] == "00FF00"
+    assert t3["state"] == "ERROR"
+    assert t4["online"] is False and t4["group"] == 1
+
+    boxes = status["boxes"]
+    assert len(boxes) == 2
+    assert boxes[0]["uid"] == _UID_A.hex() and boxes[0]["online"] is True
+    assert boxes[1]["online"] is False

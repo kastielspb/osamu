@@ -35,6 +35,34 @@ static struct {
     uint32_t deadline;  // Timer ticks
 } pending_query;
 
+// Response queue for frames that arrived while no query was pending
+// (needed for broadcast commands like DISCOVER that get multiple responses)
+#define RESPONSE_QUEUE_SIZE 8
+static struct pmu_frame response_queue[RESPONSE_QUEUE_SIZE];
+static uint8_t response_queue_head = 0;
+static uint8_t response_queue_tail = 0;
+
+static void
+queue_response(const struct pmu_frame *frame)
+{
+    uint8_t next = (response_queue_head + 1) % RESPONSE_QUEUE_SIZE;
+    if (next != response_queue_tail) {
+        response_queue[response_queue_head] = *frame;
+        response_queue_head = next;
+    }
+}
+
+static int
+dequeue_response(struct pmu_frame *frame)
+{
+    if (response_queue_tail != response_queue_head) {
+        *frame = response_queue[response_queue_tail];
+        response_queue_tail = (response_queue_tail + 1) % RESPONSE_QUEUE_SIZE;
+        return 1;
+    }
+    return 0;
+}
+
 // --- Klipper command handlers ---
 
 /*
@@ -140,18 +168,29 @@ pmu_rs485_task(void)
 
     struct pmu_frame frame;
 
+    // First, drain any queued responses (discard stale frames)
+    if (pending_query.active == 0) {
+        struct pmu_frame discard;
+        while (dequeue_response(&discard)) {
+            // Discard — these are stale responses from fire-and-forget commands
+        }
+    }
+
     // Try to receive frames
     while (pmu_rs485_recv(&rs485_bus, &frame)) {
-        // Only forward responses (bit7 set) to host
+        // Only process responses (bit7 set)
         if (frame.cmd & PMU_CMD_DIR_RESPONSE) {
-            send_rx_to_host(&frame);
-
-            // Check if this completes a pending query
-            if (pending_query.active &&
-                frame.addr == pending_query.addr &&
-                frame.seq == pending_query.seq) {
+            // Check if this completes a pending query.
+            // Match on seq only — the response addr may differ from the
+            // request addr (e.g. ASSIGN_ADDR replies with the new unicast
+            // addr, not the 0xFF broadcast addr we sent to).
+            if (pending_query.active && frame.seq == pending_query.seq) {
+                send_rx_to_host(&frame);
                 pending_query.active = 0;
             }
+            // Discard non-matching responses to avoid corrupting the
+            // host-side RetryAsyncCommand handler which accepts the first
+            // pmu_rs485_rx message unconditionally.
         }
     }
 

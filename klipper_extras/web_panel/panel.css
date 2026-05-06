@@ -1,0 +1,359 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 16px;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 0;
+    border-bottom: 1px solid #333;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #00d4aa;
+}
+
+.header-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.status-badge {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.status-badge.connected {
+    background: #00d4aa;
+    color: #000;
+}
+
+.status-badge.disconnected {
+    background: #ff4757;
+    color: #fff;
+}
+
+.btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.btn-primary {
+    background: #00d4aa;
+    color: #000;
+}
+
+.btn-primary:hover {
+    background: #00b894;
+}
+
+.btn-secondary {
+    background: #2d3436;
+    color: #dfe6e9;
+    border: 1px solid #444;
+}
+
+.btn-secondary:hover {
+    background: #3d4446;
+}
+
+.mmu-state {
+    display: flex;
+    gap: 24px;
+    padding: 12px 16px;
+    background: #16213e;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+}
+
+.box {
+    background: #16213e;
+    border-radius: 12px;
+    margin-bottom: 16px;
+    overflow: hidden;
+}
+
+.box-header {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 16px;
+    font-weight: 500;
+    border-bottom: 1px solid #333;
+}
+
+.box-header.online {
+    background: linear-gradient(90deg, #16213e 0%, #1a3a2a 100%);
+}
+
+.box-header.offline {
+    background: linear-gradient(90deg, #16213e 0%, #3a1a1a 100%);
+}
+
+.box-status {
+    font-size: 0.8rem;
+    opacity: 0.8;
+}
+
+.slots-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+    padding: 16px;
+}
+
+.slot {
+    background: #1e2a4a;
+    border-radius: 10px;
+    padding: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: 2px solid transparent;
+    position: relative;
+}
+
+.slot:hover {
+    background: #263a5a;
+    transform: translateY(-2px);
+}
+
+.slot.active {
+    border-color: #00d4aa;
+    box-shadow: 0 0 12px rgba(0, 212, 170, 0.3);
+}
+
+.slot-color {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    margin-bottom: 10px;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    box-shadow: inset 0 -4px 8px rgba(0, 0, 0, 0.3);
+}
+
+.slot-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.slot-name {
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.slot-material {
+    font-size: 0.85rem;
+    color: #a0a0a0;
+}
+
+.slot-state {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-block;
+    width: fit-content;
+    margin-top: 4px;
+}
+
+.state-loaded .slot-state {
+    background: #00d4aa;
+    color: #000;
+}
+
+.state-active .slot-state {
+    background: #ffc107;
+    color: #000;
+}
+
+.state-error .slot-state {
+    background: #ff4757;
+    color: #fff;
+}
+
+.state-empty .slot-state {
+    background: #636e72;
+    color: #fff;
+}
+
+.slot-group {
+    font-size: 0.7rem;
+    background: #6c5ce7;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-top: 4px;
+    display: inline-block;
+    width: fit-content;
+}
+
+.btn-edit {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 4px;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #aaa;
+    transition: all 0.2s;
+}
+
+.btn-edit:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+}
+
+/* Modal */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal.hidden {
+    display: none;
+}
+
+.modal-content {
+    background: #1e2a4a;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 360px;
+    overflow: hidden;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+    border-bottom: 1px solid #333;
+}
+
+.modal-header h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.btn-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    color: #aaa;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.btn-close:hover {
+    color: #fff;
+}
+
+.modal-body {
+    padding: 20px 16px;
+}
+
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+    color: #a0a0a0;
+}
+
+.color-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.color-row input[type="color"] {
+    width: 48px;
+    height: 40px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    background: none;
+}
+
+.color-row input[type="text"],
+.form-group select {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #444;
+    border-radius: 6px;
+    background: #16213e;
+    color: #fff;
+    font-size: 0.9rem;
+}
+
+.form-group select {
+    width: 100%;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 16px;
+    border-top: 1px solid #333;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+    .header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .slots-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .mmu-state {
+        flex-direction: column;
+        gap: 8px;
+    }
+}

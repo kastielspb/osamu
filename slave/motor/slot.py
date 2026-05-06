@@ -94,6 +94,13 @@ class Slot:
 
     def _set_state(self, new_state: int):
         """Transition to a new state and sync LED."""
+        import traceback
+
+        if new_state == SlotState.ASSIST:
+            import sys
+
+            traceback.print_stack(file=sys.stderr)
+            print(f"SLOT {self.id} → ASSIST", flush=True, file=sys.stderr)
         self._state = new_state
         if new_state != SlotState.ERROR:
             self._error_code = Status.OK

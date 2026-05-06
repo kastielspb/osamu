@@ -521,40 +521,78 @@ slots: 0,1,2,3
 unique_id: 0000000000000000
 slots: 4,5,6,7
 
-# --- Tool Change Macros ---
-
-[gcode_macro T0]
-gcode:
-    MMU_CHANGE_TOOL TOOL=0
-
-[gcode_macro T1]
-gcode:
-    MMU_CHANGE_TOOL TOOL=1
-
-[gcode_macro T2]
-gcode:
-    MMU_CHANGE_TOOL TOOL=2
-
-[gcode_macro T3]
-gcode:
-    MMU_CHANGE_TOOL TOOL=3
-
-[gcode_macro T4]
-gcode:
-    MMU_CHANGE_TOOL TOOL=4
-
-[gcode_macro T5]
-gcode:
-    MMU_CHANGE_TOOL TOOL=5
-
-[gcode_macro T6]
-gcode:
-    MMU_CHANGE_TOOL TOOL=6
-
-[gcode_macro T7]
-gcode:
-    MMU_CHANGE_TOOL TOOL=7
+# --- Fluidd / Mainsail buttons (see § Fluidd integration below) ---
+[include osamu_macros.cfg]
 ```
+
+> **Note:** the `[include]` expects `osamu_macros.cfg` to live next to your
+> `printer.cfg`. Either copy or symlink it in:
+> ```bash
+> ln -s /path/to/osamu/klipper_extras/osamu_macros.cfg ~/printer_data/config/
+> ```
+
+### Fluidd / Mainsail integration
+
+Once the include above is in place and Klipper has restarted, the macros panel
+shows clickable buttons:
+
+| Button | Action |
+|---|---|
+| `MMU_T0` … `MMU_T7` | One-click tool change |
+| `MMU_BTN_HOME` | Initialize and enumerate slaves |
+| `MMU_BTN_UNLOAD` | Retract the currently loaded filament |
+| `MMU_BTN_STATUS` | Print MMU + per-slot state to the console |
+| `MMU_BTN_DASH` | Formatted live state echo (uses `printer.pico_mmu`) |
+
+`MMU_T0`..`MMU_T7` match the default `tool_count: 8`. Trim the include file or
+extend it if your setup differs.
+
+#### Live status object
+
+The extras module exposes a status payload at `printer.pico_mmu`. Query it
+from the Klipper host:
+
+```bash
+curl 'http://<klipper-host>:7125/printer/objects/query?pico_mmu' | jq
+```
+
+Sample response:
+
+```json
+{
+  "result": {
+    "status": {
+      "pico_mmu": {
+        "state": "idle",
+        "current_tool": -1,
+        "target_tool": -1,
+        "tool_count": 8,
+        "tools": [
+          { "tool": 0, "slave_addr": 1, "online": true,
+            "state": "LOADED", "color": "FF0000",
+            "material": "PLA", "group": 0 }
+        ],
+        "boxes": [
+          { "addr": 1, "online": true, "uid": "0102030405060708",
+            "fw_version": "0.1", "slots": [0, 1, 2, 3] }
+        ]
+      }
+    }
+  }
+}
+```
+
+Fluidd and Mainsail subscribe to printer-object updates over their WebSocket,
+so changes to `printer.pico_mmu` propagate automatically — useful for custom
+dashboard panels, runout indicators, or third-party tooling.
+
+#### Verification
+
+1. `FIRMWARE_RESTART` after editing `printer.cfg`.
+2. Open Fluidd → **Macros**: confirm that `MMU_T0`..`MMU_T7` and the four
+   `MMU_BTN_*` buttons are listed.
+3. Click **MMU_BTN_HOME** and watch the console for `MMU: Home complete`.
+4. Click **MMU_BTN_DASH** to see the live state echo.
 
 ---
 

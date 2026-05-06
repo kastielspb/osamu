@@ -179,6 +179,10 @@ class PicoMmu:
 
         # Polling timer
         self._poll_timer = None
+        # Bus lock: prevents polling while a G-code command uses _rs485_query.
+        # Only one RetryAsyncCommand handler can be active for pmu_rs485_rx at a time.
+        self._bus_busy = False
+        self._query_active = False
 
         # Register event handlers
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
@@ -237,40 +241,71 @@ class PicoMmu:
         """Send an RS485 frame (fire-and-forget)."""
         self.rs485_cmd.send([addr, cmd, data])
 
-    def _rs485_query(self, addr, cmd, data=b"", timeout_ms=50):
-        """Send an RS485 frame and wait for response."""
-        timeout_ticks = self.mcu.seconds_to_clock(timeout_ms / 1000.0)
-        params = self.rs485_query_cmd.send([addr, cmd, data, timeout_ticks])
-        if params is None:
-            return None
-        return params.get("data", b"")
+    def _rs485_query(self, addr, cmd, data=b"", timeout_ms=500):
+        """Send an RS485 frame and wait for response. Serializes bus access."""
+        # Wait for any in-flight query to complete before starting a new one.
+        # The MCU can only track one pending query at a time.
+        deadline = self.reactor.monotonic() + 5.0
+        while self._query_active:
+            if self.reactor.monotonic() > deadline:
+                self._query_active = False
+                break
+            self.reactor.pause(self.reactor.monotonic() + 0.01)
+        self._query_active = True
+        try:
+            timeout_ticks = self.mcu.seconds_to_clock(timeout_ms / 1000.0)
+            params = self.rs485_query_cmd.send([addr, cmd, data, timeout_ticks])
+            if params is None:
+                return None
+            return params.get("data", b"")
+        finally:
+            self._query_active = False
 
     # --- Polling ---
 
     def _poll_slaves(self, eventtime):
-        """Periodic polling of all online slaves."""
-        for slave in self.slaves:
-            if not slave.online or slave.addr == 0:
-                continue
-            resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
-            if resp and len(resp) >= 6:
-                new_states = list(resp[:4])
-                old_states = list(slave.slot_states)
-                # Detect ASSIST→EMPTY on the currently printing slot.
-                if self.state == STATE_PRINTING and self.current_tool >= 0:
-                    ct_slave, ct_local = self._resolve_tool(self.current_tool)
-                    if (
-                        ct_slave is slave
-                        and ct_local < len(old_states)
-                        and old_states[ct_local] == SlotState.ASSIST
-                        and new_states[ct_local] == SlotState.EMPTY
-                        and not self._runout_scheduled
-                    ):
-                        self._runout_scheduled = True
-                        self.reactor.register_callback(self._handle_runout)
-                slave.slot_states = new_states
-            else:
-                slave.online = False
+        """
+        Periodic polling of all online slaves.
+
+        The reactor logs and shuts down the printer if a timer callback
+        raises, so any RS485-side exception (bus timeout, slave dropped,
+        framing error) must be swallowed here — the next tick will retry.
+        Marking the slave offline lets the polling loop skip it cleanly
+        instead of repeatedly hitting the same failure.
+        """
+        if self._bus_busy:
+            return eventtime + self.polling_interval
+        self._bus_busy = True
+        try:
+            for slave in self.slaves:
+                if not slave.online or slave.addr == 0:
+                    continue
+                try:
+                    resp = self._rs485_query(slave.addr, Cmd.GET_STATUS)
+                except Exception:
+                    slave.online = False
+                    continue
+                if resp and len(resp) >= 6:
+                    new_states = list(resp[:4])
+                    old_states = list(slave.slot_states)
+                    # Detect ASSIST→EMPTY on the currently printing slot.
+                    if self.state == STATE_PRINTING and self.current_tool >= 0:
+                        ct_slave, ct_local = self._resolve_tool(self.current_tool)
+                        if (
+                            ct_slave is slave
+                            and ct_local is not None
+                            and ct_local < len(old_states)
+                            and old_states[ct_local] == SlotState.ASSIST
+                            and new_states[ct_local] == SlotState.EMPTY
+                            and not self._runout_scheduled
+                        ):
+                            self._runout_scheduled = True
+                            self.reactor.register_callback(self._handle_runout)
+                    slave.slot_states = new_states
+                else:
+                    slave.online = False
+        finally:
+            self._bus_busy = False
 
         return eventtime + self.polling_interval
 
@@ -303,15 +338,20 @@ class PicoMmu:
                     self.gcode.respond_info(
                         f"MMU: Slave {slave.unique_id.hex()} assigned addr {next_addr}"
                     )
-                    # Push stored filament info to the slave
-                    for j, global_slot in enumerate(slave.slots):
-                        if global_slot in self._tool_filaments:
-                            r, g, b, mat = self._tool_filaments[global_slot]
-                            mat_bytes = mat[:4].encode("ascii", errors="replace").ljust(4, b"\x00")
-                            self._rs485_send(
-                                slave.addr, Cmd.SET_FILAMENT, bytes([j, r, g, b]) + mat_bytes
-                            )
                 next_addr += 1
+
+        # Push stored filament info AFTER all addresses are assigned.
+        # This avoids fire-and-forget responses interfering with subsequent
+        # ASSIGN_ADDR queries (both share the pmu_rs485_rx handler).
+        for slave in self.slaves:
+            if not slave.online:
+                continue
+            for j, global_slot in enumerate(slave.slots):
+                if global_slot in self._tool_filaments:
+                    r, g, b, mat = self._tool_filaments[global_slot]
+                    mat_bytes = mat[:4].encode("ascii", errors="replace").ljust(4, b"\x00")
+                    self._rs485_query(slave.addr, Cmd.SET_FILAMENT, bytes([j, r, g, b]) + mat_bytes)
+
         self._build_slot_groups()
 
     # --- Infinite spool: group resolution ---
@@ -419,11 +459,13 @@ class PicoMmu:
             # Tip-forming only (no RETRACT — filament already retracted by runout).
             self.state = STATE_TIP_FORMING
             self.gcode.run_script_from_command("PAUSE")
-            self.gcode.run_script_from_command("G92 E0")
-            self.gcode.run_script_from_command("G1 E-5 F3600")
-            self.gcode.run_script_from_command("G1 E2 F1800")
-            self.gcode.run_script_from_command("G1 E-15 F3000")
-            self.gcode.run_script_from_command("G92 E0")
+            self._emit_extruder_gcode(
+                "G92 E0",
+                "G1 E-5 F3600",
+                "G1 E2 F1800",
+                "G1 E-15 F3000",
+                "G92 E0",
+            )
 
             slave, local_slot = self._resolve_tool(new_tool)
             # gcmd is None — _do_load does not use it directly.
@@ -457,6 +499,13 @@ class PicoMmu:
 
     def cmd_MMU_HOME(self, gcmd):
         """MMU_HOME: Enumerate and initialize all slaves."""
+        # Stop polling during enumeration to avoid concurrent query collisions.
+        # Both _poll_slaves and _enumerate_slaves use _rs485_query which registers
+        # a handler for pmu_rs485_rx — only one can be active at a time.
+        if self._poll_timer:
+            self.reactor.unregister_timer(self._poll_timer)
+            self._poll_timer = None
+        self._bus_busy = True
         self.gcode.respond_info("MMU: Starting enumeration...")
         self._enumerate_slaves()
 
@@ -471,6 +520,11 @@ class PicoMmu:
 
         self.gcode.respond_info(f"MMU: Home complete. {online_count} slaves online.")
         self.state = STATE_IDLE
+        self._bus_busy = False
+        # Restart polling now that enumeration is complete.
+        self._poll_timer = self.reactor.register_timer(
+            self._poll_slaves, self.reactor.monotonic() + self.polling_interval
+        )
 
     def cmd_MMU_STATUS(self, gcmd):
         """MMU_STATUS: Display current MMU state."""
@@ -498,6 +552,7 @@ class PicoMmu:
             raise gcmd.error(f"MMU: Slave for T{tool} is offline")
 
         self.target_tool = tool
+        self._bus_busy = True
 
         try:
             # 1. Unload current tool if loaded
@@ -516,6 +571,8 @@ class PicoMmu:
             # Pause print
             self.gcode.run_script_from_command("PAUSE")
             raise gcmd.error(f"MMU: Tool change failed: {e}")
+        finally:
+            self._bus_busy = False
 
     def cmd_MMU_LOAD(self, gcmd):
         """MMU_LOAD TOOL=N: Load filament without full change."""
@@ -524,12 +581,28 @@ class PicoMmu:
         if slave is None or not slave.online:
             raise gcmd.error(f"MMU: Tool T{tool} unavailable")
 
+        # Idempotent: re-issuing MMU_LOAD for the active tool is a no-op when
+        # the slot is already engaged (LOADED or ASSIST).  Without this the
+        # second call hits FEED-on-ASSIST and returns BUSY.
+        if (
+            self.current_tool == tool
+            and local_slot is not None
+            and local_slot < len(slave.slot_states)
+        ):
+            current = slave.slot_states[local_slot]
+            if current in (SlotState.LOADED, SlotState.ASSIST):
+                gcmd.respond_info(f"MMU: T{tool} already loaded")
+                return
+
+        self._bus_busy = True
         try:
             self._do_load(gcmd, slave, local_slot, tool)
             self.current_tool = tool
         except PicoMmuError as e:
             self.state = STATE_ERROR
             raise gcmd.error(f"MMU: Load failed: {e}")
+        finally:
+            self._bus_busy = False
 
     def cmd_MMU_UNLOAD(self, gcmd):
         """MMU_UNLOAD: Unload current filament."""
@@ -537,12 +610,15 @@ class PicoMmu:
             self.gcode.respond_info("MMU: No tool loaded")
             return
 
+        self._bus_busy = True
         try:
             self._do_unload(gcmd)
             self.current_tool = -1
         except PicoMmuError as e:
             self.state = STATE_ERROR
             raise gcmd.error(f"MMU: Unload failed: {e}")
+        finally:
+            self._bus_busy = False
 
     def cmd_MMU_SELECT(self, gcmd):
         """MMU_SELECT TOOL=N: Select tool without loading."""
@@ -555,27 +631,53 @@ class PicoMmu:
 
     # --- Internal operations ---
 
+    def _emit_extruder_gcode(self, *scripts):
+        """
+        Run extruder G-code (E moves, G92 E0).  Silently skips when no
+        ``[extruder]`` is configured — keeps load/unload usable during
+        commissioning and in the integration-test rig (kinematics: none).
+        """
+        if self.printer.lookup_object("extruder", None) is None:
+            return
+        for s in scripts:
+            self.gcode.run_script_from_command(s)
+
     def _do_unload(self, gcmd):
         """Perform unload sequence: tip forming + retract."""
         self.state = STATE_TIP_FORMING
 
         # Tip forming (retract sequence via extruder)
-        self.gcode.run_script_from_command("G92 E0")
-        self.gcode.run_script_from_command("G1 E-5 F3600")  # Quick retract
-        self.gcode.run_script_from_command("G1 E2 F1800")  # Pause
-        self.gcode.run_script_from_command("G1 E-15 F3000")  # Long retract
-        self.gcode.run_script_from_command("G92 E0")
+        self._emit_extruder_gcode(
+            "G92 E0",
+            "G1 E-5 F3600",  # Quick retract
+            "G1 E2 F1800",  # Pause
+            "G1 E-15 F3000",  # Long retract
+            "G92 E0",
+        )
 
         self.state = STATE_UNLOADING
 
         # Send retract to slave
         slave, local_slot = self._resolve_tool(self.current_tool)
-        if slave is None:
+        if slave is None or local_slot is None:
             raise PicoMmuError("Current tool slave not found")
+
+        # If the slot already reports EMPTY (e.g. runaway runout, manual unload,
+        # or test rig with sensor pre-cleared) RETRACT would return
+        # ERR_SLOT_EMPTY.  Treat the unload as already complete.
+        if local_slot < len(slave.slot_states) and slave.slot_states[local_slot] == SlotState.EMPTY:
+            return
 
         speed_data = struct.pack("<BH", local_slot, 1000)
         resp = self._rs485_query(slave.addr, Cmd.RETRACT, speed_data)
-        if resp is None or resp[0] != Status.OK:
+        if resp is None:
+            raise PicoMmuError(f"Retract command failed for T{self.current_tool}")
+        # ERR_SLOT_EMPTY here means the slot emptied between the cache check
+        # above and the RETRACT command arriving at the slave (e.g. sensor
+        # cleared by a runout).  The unload outcome we wanted is already true.
+        if resp[0] == Status.ERR_SLOT_EMPTY:
+            return
+        if resp[0] != Status.OK:
             raise PicoMmuError(f"Retract command failed for T{self.current_tool}")
 
         # Wait for retract to complete (sensor clears)
@@ -589,8 +691,12 @@ class PicoMmu:
         # Send feed command to slave
         speed_data = struct.pack("<BH", local_slot, 800)
         resp = self._rs485_query(slave.addr, Cmd.FEED, speed_data)
-        if resp is None or resp[0] != Status.OK:
-            raise PicoMmuError(f"Feed command failed for T{tool}")
+        if resp is None or len(resp) == 0 or resp[0] != Status.OK:
+            raise PicoMmuError(
+                f"Feed command failed for T{tool} "
+                f"(addr={slave.addr} slot={local_slot} "
+                f"resp={resp.hex() if resp else None} states={slave.slot_states})"
+            )
 
         self.state = STATE_LOADING
 
@@ -607,9 +713,11 @@ class PicoMmu:
             raise PicoMmuError(f"Assist mode failed for T{tool}")
 
         # Feed into extruder
-        self.gcode.run_script_from_command("G92 E0")
-        self.gcode.run_script_from_command("G1 E30 F300")  # Slow feed into hotend
-        self.gcode.run_script_from_command("G92 E0")
+        self._emit_extruder_gcode(
+            "G92 E0",
+            "G1 E30 F300",  # Slow feed into hotend
+            "G92 E0",
+        )
 
     def _wait_slot_state(self, slave, local_slot, target_state, timeout_s=30):
         """Poll slave until slot reaches target state or timeout."""
@@ -649,6 +757,55 @@ class PicoMmu:
             if slave.online:
                 self._rs485_send(slave.addr, Cmd.STOP_ALL)
 
+    # --- Status (Moonraker / Fluidd) ---
+
+    def get_status(self, eventtime):
+        """
+        Status payload exposed under ``printer.pico_mmu``.
+
+        Moonraker reads this via ``/printer/objects/query?pico_mmu`` and
+        streams diffs over its WebSocket, which is what Fluidd subscribes
+        to. The payload is intentionally flat and JSON-serialisable so a
+        Fluidd template/panel can render it without further parsing.
+        """
+        tools = []
+        for slave in self.slaves:
+            for j, tool in enumerate(slave.slots):
+                r, g, b, material = self._tool_filaments.get(tool, (0, 0, 0, ""))
+                state_int = slave.slot_states[j] if j < len(slave.slot_states) else SlotState.EMPTY
+                tools.append(
+                    {
+                        "tool": tool,
+                        "slave_addr": slave.addr,
+                        "online": slave.online,
+                        "state": SLOT_STATE_NAMES.get(state_int, "UNKNOWN"),
+                        "color": "%02X%02X%02X" % (r, g, b),
+                        "material": material,
+                        "group": self._effective_groups.get(tool, 0),
+                    }
+                )
+        tools.sort(key=lambda t: t["tool"])
+
+        boxes = [
+            {
+                "addr": slave.addr,
+                "online": slave.online,
+                "uid": slave.unique_id.hex(),
+                "fw_version": "%d.%d" % slave.fw_version,
+                "slots": list(slave.slots),
+            }
+            for slave in self.slaves
+        ]
+
+        return {
+            "state": self.state,
+            "current_tool": self.current_tool,
+            "target_tool": self.target_tool,
+            "tool_count": self.tool_count,
+            "tools": tools,
+            "boxes": boxes,
+        }
+
     # --- Filament color ---
 
     def _parse_hex_color(self, hex_str):
@@ -680,7 +837,7 @@ class PicoMmu:
         self._tool_filaments[tool] = (r, g, b, material)
         self._build_slot_groups()
         mat_bytes = material.encode("ascii", errors="replace").ljust(4, b"\x00")
-        self._rs485_send(slave.addr, Cmd.SET_FILAMENT, bytes([local_slot, r, g, b]) + mat_bytes)
+        self._rs485_query(slave.addr, Cmd.SET_FILAMENT, bytes([local_slot, r, g, b]) + mat_bytes)
         # Persist overrides via [save_variables]
         svars = self.printer.lookup_object("save_variables", None)
         if svars is not None:

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSAMU MMU</title>
+    <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>OSAMU MMU</h1>
+            <div class="header-controls">
+                <span id="connection-status" class="status-badge disconnected">Disconnected</span>
+                <button id="btn-home" class="btn btn-secondary">Home</button>
+                <button id="btn-unload" class="btn btn-secondary">Unload</button>
+            </div>
+        </header>
+
+        <div id="mmu-state" class="mmu-state">
+            <span>State: <strong id="state-text">-</strong></span>
+            <span>Active: <strong id="active-tool">-</strong></span>
+        </div>
+
+        <div id="boxes-container"></div>
+    </div>
+
+    <div id="edit-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title">Edit Filament</h2>
+                <button id="modal-close" class="btn-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="color-input">Color</label>
+                    <div class="color-row">
+                        <input type="color" id="color-picker" value="#00FF00">
+                        <input type="text" id="color-input" placeholder="FF5500" maxlength="6" pattern="[0-9A-Fa-f]{6}">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="material-select">Material</label>
+                    <select id="material-select">
+                        <option value="">-</option>
+                        <option value="PLA">PLA</option>
+                        <option value="PETG">PETG</option>
+                        <option value="ABS">ABS</option>
+                        <option value="ASA">ASA</option>
+                        <option value="TPU">TPU</option>
+                        <option value="PA">PA (Nylon)</option>
+                        <option value="PC">PC</option>
+                        <option value="PVA">PVA</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="modal-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="modal-save" class="btn btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="panel.js"></script>
+</body>
+</html>

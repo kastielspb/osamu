@@ -163,6 +163,65 @@ Runs on the Klipper host. Provides G-code commands and orchestrates the full too
 2. **Load T1** — slave feeds at 800 Hz until master's filament sensor triggers (60 s timeout).
 3. **Assist mode** — slave switches to 150 mA; extruder pulls filament into nozzle at 300 mm/s. Printing resumes.
 
+### Web Panel (Fluidd/Mainsail)
+
+A standalone visual panel provides Bambu Lab AMS-style slot management.
+
+**Installation:**
+
+1. **Symlink the Moonraker component:**
+   ```bash
+   ln -s /path/to/osamu/klipper_extras/mmu_panel.py ~/moonraker/moonraker/components/
+   ```
+
+2. **Add to `moonraker.conf`:**
+   ```ini
+   [mmu_panel]
+   path: /path/to/osamu/klipper_extras/web_panel
+   ```
+
+3. **Restart Moonraker:**
+   ```bash
+   sudo systemctl restart moonraker
+   ```
+
+4. **Access the panel:**
+   ```
+   http://<printer-ip>/server/mmu/
+   ```
+
+**Fluidd Integration (as camera iframe):**
+
+Option A — via UI:
+1. Open Fluidd → Settings (⚙️) → Cameras
+2. Click **Add Camera**
+3. Configure:
+   - Name: `MMU`
+   - URL: `/server/mmu/`
+   - Camera Service: `iframe`
+4. The panel will appear in the camera section of the dashboard
+
+Option B — via `.fluidd.json` (in `~/printer_data/config/`):
+```json
+{
+  "cameras": [
+    {
+      "name": "MMU",
+      "url": "/server/mmu/",
+      "service": "iframe"
+    }
+  ]
+}
+```
+Then restart Fluidd or reload the page.
+
+**Features:**
+- Real-time slot status via WebSocket
+- Click slot to change tool
+- Edit filament color and material per slot
+- Home/Unload buttons
+- Infinite spool group indicators
+
 ### Automatic Enumeration
 
 Slaves ship with address `0xFF` (unassigned). Each RP2350 has a unique 8-byte ROM ID. On `MMU_HOME`:
@@ -189,8 +248,9 @@ docs/
   hardware-spec.md  # Hardware architecture and wiring
   firmware-spec.md  # Protocol and firmware specification
   build-guide.md    # Step-by-step build and setup guide
-extras/          # Klipper extras module (pico_mmu.py)
-klipper_ams/     # Klipper AMS configuration
+klipper_extras/  # Klipper extras module (pico_mmu.py)
+  osamu_macros.cfg  # Macro buttons for Fluidd/Mainsail
+  web_panel/       # Visual MMU panel (HTML/JS/CSS)
 master/          # Master MCU firmware (C)
   pico_mmu/
 slave/           # Slave box firmware (MicroPython)
